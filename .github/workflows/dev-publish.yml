@@ -8,9 +8,7 @@ name: Publish Dev
 # set the repository variable NPM_PACKAGE_NAME in Settings > Variables > Actions.
 
 on:
-  push:
-    branches:
-      - develop
+  workflow_dispatch:
 
 jobs:
   publish-dev:
