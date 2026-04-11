@@ -3680,18 +3680,35 @@ export class P2PClientProtocol extends TypedEmitter<P2PClientProtocolEvents> {
                 if (payload) {
                   this.emit("storage info hb3", message.channel, payload.body);
                 }
-              } else if (json.cmd === 6246) {
-                const payload = json.payload as { num?: number };
-                rootP2PLogger.debug(
-                  `Handle DATA ${P2PDataType[message.dataType]} - CMD_NOTIFY_PAYLOAD Livestream status`,
-                  { stationSN: this.rawStation.station_sn, payload: payload }
-                );
-                if (payload?.num !== undefined) {
-                  if (payload.num > 0) {
-                    this.emit("rtsp livestream started", message.channel);
-                  } else {
-                    this.emit("rtsp livestream stopped", message.channel);
-                  }
+              } else if (json.cmd === CommandType.SUB1G_REP_SMARTDROP_OPEN) {
+                try {
+                  rootP2PLogger.debug(
+                    `Handle DATA ${P2PDataType[message.dataType]} - CMD_NOTIFY_PAYLOAD SmartDrop Open`,
+                    { stationSN: this.rawStation.station_sn, payload: json.payload }
+                  );
+                  const openPayload = json.payload as unknown as { evt: number; openType?: number; userIndex?: number };
+                  this.emit("smartdrop open", message.channel, openPayload.evt, openPayload.openType ?? 0, openPayload.userIndex);
+                } catch (err) {
+                  const error = ensureError(err);
+                  rootP2PLogger.error(
+                    `Handle DATA ${P2PDataType[message.dataType]} - CMD_NOTIFY_PAYLOAD SmartDrop Open - Error`,
+                    { error: getError(error), stationSN: this.rawStation.station_sn, message: data.toString() }
+                  );
+                }
+              } else if (json.cmd === CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT) {
+                try {
+                  rootP2PLogger.debug(
+                    `Handle DATA ${P2PDataType[message.dataType]} - CMD_NOTIFY_PAYLOAD SmartDrop Delivery Count`,
+                    { stationSN: this.rawStation.station_sn, payload: json.payload }
+                  );
+                  const deliveryPayload = json.payload as unknown as { num: number };
+                  this.emit("smartdrop delivery count", message.channel, deliveryPayload.num);
+                } catch (err) {
+                  const error = ensureError(err);
+                  rootP2PLogger.error(
+                    `Handle DATA ${P2PDataType[message.dataType]} - CMD_NOTIFY_PAYLOAD SmartDrop Delivery Count - Error`,
+                    { error: getError(error), stationSN: this.rawStation.station_sn, message: data.toString() }
+                  );
                 }
               } else if (json.cmd === CommandType.CMD_HUB_NOTIFY_UPDATE) {
                 rootP2PLogger.debug(

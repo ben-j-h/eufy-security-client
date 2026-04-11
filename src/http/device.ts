@@ -6228,24 +6228,26 @@ export class SmartDrop extends Camera {
                       this.updateProperty(PropertyName.DeviceOpenedByType, 2);
                       this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
                       this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-                      this.updateProperty(PropertyName.DevicePackageDelivered, false);
+                      this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
                     } else {
-                      // Delivery/access PIN — name from message.name (carrier name field)
-                      const pinName = message.name !== undefined ? message.name : (message.pin ?? "");
+                      // Delivery/access PIN — use person_name (carrier ID, e.g. "USPS") over notification name
+                      const pinName = !isEmpty(message.person_name) ? message.person_name! : (message.name ?? (message.pin ?? ""));
                       this.updateProperty(PropertyName.DeviceOpenedByType, 3);
                       this.updateProperty(PropertyName.DeviceOpenedByName, pinName);
                       this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
                       this.updateProperty(PropertyName.DeviceLastOpenedByName, pinName);
                     }
                     break;
-                  case SmartDropOpenedBy.CARRIER:
-                    // Carrier delivery
+                  case SmartDropOpenedBy.CARRIER: {
+                    // Carrier delivery — use person_name (carrier ID, e.g. "USPS") over notification name
+                    const carrierName = !isEmpty(message.person_name) ? message.person_name! : (message.name ?? "");
                     this.updateProperty(PropertyName.DeviceOpenedByType, 4);
-                    this.updateProperty(PropertyName.DeviceOpenedByName, message.name !== undefined ? message.name : "");
+                    this.updateProperty(PropertyName.DeviceOpenedByName, carrierName);
                     this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByName, message.name !== undefined ? message.name : "");
+                    this.updateProperty(PropertyName.DeviceLastOpenedByName, carrierName);
                     this.updateProperty(PropertyName.DevicePackageDelivered, true);
                     break;
+                  }
                   case SmartDropOpenedBy.EMERGENCY_RELEASE_BUTTON:
                     // Opened via emergency release button
                     this.updateProperty(PropertyName.DeviceOpenedByType, 5);
@@ -6432,13 +6434,13 @@ export class SmartDrop extends Camera {
           this.updateProperty(PropertyName.DeviceOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-          this.updateProperty(PropertyName.DevicePackageDelivered, false);
+          this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
         } else if (userIndex === undefined) {
           // Press open (no PIN, no userIndex) — box assumed empty
           this.updateProperty(PropertyName.DeviceOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-          this.updateProperty(PropertyName.DevicePackageDelivered, false);
+          this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
         } else {
           // Delivery/access code (non-zero userIndex) — defer delivery state to cmd 6246
           this.updateProperty(PropertyName.DeviceOpenedByType, 3);
@@ -6471,7 +6473,7 @@ export class SmartDrop extends Camera {
       }
       this.emit("open", this, open);
     } else if (metadata.name === PropertyName.DeviceDeliveries) {
-      this.updateProperty(PropertyName.DevicePackageDelivered, (newValue as number) > 0);
+      this.updateProperty(PropertyName.DevicePackageDelivered, (newValue as number) > 0, true);
     } else if (metadata.name === PropertyName.DevicePackageDelivered) {
       if ((newValue as boolean) === false) {
         this.updateProperty(PropertyName.DeviceTimesOpened, 0);
