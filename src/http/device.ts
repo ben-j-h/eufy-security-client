@@ -6236,6 +6236,21 @@ export class SmartDrop extends Camera {
                       this.updateProperty(PropertyName.DeviceOpenedByName, pinName);
                       this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
                       this.updateProperty(PropertyName.DeviceLastOpenedByName, pinName);
+                      if (!isEmpty(message.person_name)) {
+                        // Carrier used their delivery PIN — package was delivered
+                        this.updateProperty(PropertyName.DevicePackageDelivered, true);
+                        this.updateProperty(PropertyName.DevicePersonName, pinName);
+                        this.updateProperty(PropertyName.DevicePersonDetected, true);
+                        this.clearEventTimeout(DeviceEvent.PersonDetected);
+                        this.eventTimeouts.set(
+                          DeviceEvent.PersonDetected,
+                          setTimeout(async () => {
+                            this.updateProperty(PropertyName.DevicePersonName, "");
+                            this.updateProperty(PropertyName.DevicePersonDetected, false);
+                            this.eventTimeouts.delete(DeviceEvent.PersonDetected);
+                          }, eventDurationSeconds * 1000)
+                        );
+                      }
                     }
                     break;
                   case SmartDropOpenedBy.CARRIER: {
@@ -6246,6 +6261,19 @@ export class SmartDrop extends Camera {
                     this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
                     this.updateProperty(PropertyName.DeviceLastOpenedByName, carrierName);
                     this.updateProperty(PropertyName.DevicePackageDelivered, true);
+                    if (!isEmpty(carrierName)) {
+                      this.updateProperty(PropertyName.DevicePersonName, carrierName);
+                      this.updateProperty(PropertyName.DevicePersonDetected, true);
+                      this.clearEventTimeout(DeviceEvent.PersonDetected);
+                      this.eventTimeouts.set(
+                        DeviceEvent.PersonDetected,
+                        setTimeout(async () => {
+                          this.updateProperty(PropertyName.DevicePersonName, "");
+                          this.updateProperty(PropertyName.DevicePersonDetected, false);
+                          this.eventTimeouts.delete(DeviceEvent.PersonDetected);
+                        }, eventDurationSeconds * 1000)
+                      );
+                    }
                     break;
                   }
                   case SmartDropOpenedBy.EMERGENCY_RELEASE_BUTTON:
@@ -6467,10 +6495,6 @@ export class SmartDrop extends Camera {
     super.handlePropertyChange(metadata, oldValue, newValue);
     if (metadata.name === PropertyName.DeviceOpen) {
       const open = newValue as boolean;
-      if (open === false) {
-        this.updateProperty(PropertyName.DeviceOpenedByType, 0);
-        this.updateProperty(PropertyName.DeviceOpenedByName, "");
-      }
       this.emit("open", this, open);
     } else if (metadata.name === PropertyName.DeviceDeliveries) {
       this.updateProperty(PropertyName.DevicePackageDelivered, (newValue as number) > 0, true);
