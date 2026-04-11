@@ -745,6 +745,12 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
               station.on("device wrong try-protect alarm", (deviceSN: string) =>
                 this.onStationDeviceWrongTryProtectAlarm(deviceSN)
               );
+              station.on("smartdrop open", (deviceSN: string, evt: number, openType: number, userIndex: number | undefined) =>
+                this.onStationSmartDropOpen(deviceSN, evt, openType, userIndex)
+              );
+              station.on("smartdrop delivery count", (deviceSN: string, num: number) =>
+                this.onStationSmartDropDeliveryCount(deviceSN, num)
+              );
               station.on("device pin verified", (deviceSN: string, successfull: boolean) =>
                 this.onStationDevicePinVerified(deviceSN, successfull)
               );
@@ -3155,6 +3161,28 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
           error: getError(error),
           deviceSN: deviceSN,
         });
+      });
+  }
+
+  private onStationSmartDropOpen(deviceSN: string, evt: number, openType: number, userIndex: number | undefined): void {
+    this.getDevice(deviceSN)
+      .then((device: Device) => {
+        if (device.isSmartDrop()) (device as SmartDrop).p2pOpenEvent(evt, openType, userIndex);
+      })
+      .catch((err) => {
+        const error = ensureError(err);
+        rootMainLogger.error(`onStationSmartDropOpen error`, { error: getError(error), deviceSN: deviceSN });
+      });
+  }
+
+  private onStationSmartDropDeliveryCount(deviceSN: string, num: number): void {
+    this.getDevice(deviceSN)
+      .then((device: Device) => {
+        if (device.isSmartDrop()) (device as SmartDrop).p2pDeliveryCountEvent(num);
+      })
+      .catch((err) => {
+        const error = ensureError(err);
+        rootMainLogger.error(`onStationSmartDropDeliveryCount error`, { error: getError(error), deviceSN: deviceSN });
       });
   }
 

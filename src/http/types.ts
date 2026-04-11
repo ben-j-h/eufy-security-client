@@ -870,6 +870,9 @@ export enum PropertyName {
   DeviceOpen = "open",
   DeviceOpenedByType = "openedByType",
   DeviceOpenedByName = "openedByName",
+  DeviceLastOpenedByType = "lastOpenedByType",
+  DeviceLastOpenedByName = "lastOpenedByName",
+  DeviceTimesOpened = "timesOpened",
   DeviceTamperingAlert = "tamperingAlert",
   DeviceLowTemperatureAlert = "lowTemperatureAlert",
   DeviceHighTemperatureAlert = "highTemperatureAlert",
@@ -5176,7 +5179,7 @@ export const DeviceOpenedByTypeProperty: PropertyMetadataNumeric = {
     1: "App",
     2: "Master PIN",
     3: "Delivery PIN",
-    4: "Without Key",
+    4: "Carrier",
     5: "Emergency Release Button",
     6: "Key",
   },
@@ -5191,6 +5194,45 @@ export const DeviceOpenedByNameProperty: PropertyMetadataString = {
   writeable: false,
   type: "string",
   default: "",
+};
+
+export const DeviceLastOpenedByTypeProperty: PropertyMetadataNumeric = {
+  key: "custom_lastOpenedByType",
+  name: PropertyName.DeviceLastOpenedByType,
+  label: "Last Opened By Type",
+  readable: true,
+  writeable: false,
+  type: "number",
+  states: {
+    0: "None",
+    1: "App",
+    2: "Master PIN",
+    3: "Delivery PIN",
+    4: "Carrier",
+    5: "Emergency Release Button",
+    6: "Key",
+  },
+  default: 0,
+};
+
+export const DeviceLastOpenedByNameProperty: PropertyMetadataString = {
+  key: "custom_lastOpenedByName",
+  name: PropertyName.DeviceLastOpenedByName,
+  label: "Last Opened By Name",
+  readable: true,
+  writeable: false,
+  type: "string",
+  default: "",
+};
+
+export const DeviceTimesOpenedProperty: PropertyMetadataNumeric = {
+  key: "custom_timesOpened",
+  name: PropertyName.DeviceTimesOpened,
+  label: "Times Opened",
+  readable: true,
+  writeable: false,
+  type: "number",
+  default: 0,
 };
 
 export const DeviceTamperingAlertProperty: PropertyMetadataBoolean = {
@@ -5274,7 +5316,7 @@ export const DeviceHasMasterPinProperty: PropertyMetadataBoolean = {
 };
 
 export const DeviceDeliveriesProperty: PropertyMetadataNumeric = {
-  key: CommandType.CMD_SMART_DROP_IS_PIN_REQUIRED,
+  key: CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT,
   name: PropertyName.DeviceDeliveries,
   label: "Deliveries",
   readable: true,
@@ -8329,6 +8371,9 @@ export const DeviceProperties: Properties = {
     [PropertyName.DeviceOpen]: DeviceOpenProperty,
     [PropertyName.DeviceOpenedByName]: DeviceOpenedByNameProperty,
     [PropertyName.DeviceOpenedByType]: DeviceOpenedByTypeProperty,
+    [PropertyName.DeviceLastOpenedByName]: DeviceLastOpenedByNameProperty,
+    [PropertyName.DeviceLastOpenedByType]: DeviceLastOpenedByTypeProperty,
+    [PropertyName.DeviceTimesOpened]: DeviceTimesOpenedProperty,
     [PropertyName.DeviceTamperingAlert]: DeviceTamperingAlertProperty,
     [PropertyName.DeviceLowTemperatureAlert]: DeviceLowTemperatureAlertProperty,
     [PropertyName.DeviceHighTemperatureAlert]: DeviceHighTemperatureAlertProperty,

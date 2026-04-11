@@ -272,6 +272,12 @@ export class Station extends TypedEmitter<StationEvents> {
     this.p2pSession.on("jammed", (channel: number) => this.onDeviceJammed(channel));
     this.p2pSession.on("low battery", (channel: number) => this.onDeviceLowBattery(channel));
     this.p2pSession.on("wrong try-protect alarm", (channel: number) => this.onDeviceWrongTryProtectAlarm(channel));
+    this.p2pSession.on("smartdrop open", (channel: number, evt: number, openType: number, userIndex: number | undefined) =>
+      this.onSmartDropOpen(channel, evt, openType, userIndex)
+    );
+    this.p2pSession.on("smartdrop delivery count", (channel: number, num: number) =>
+      this.onSmartDropDeliveryCount(channel, num)
+    );
     this.p2pSession.on("sd info ex", (sdStatus, sdCapacity, sdCapacityAvailable) =>
       this.onSdInfoEx(sdStatus, sdCapacity, sdCapacityAvailable)
     );
@@ -13348,6 +13354,20 @@ export class Station extends TypedEmitter<StationEvents> {
     const deviceSerial = this._getDeviceSerial(channel);
     if (deviceSerial !== undefined) {
       this.emit("device wrong try-protect alarm", deviceSerial);
+    }
+  }
+
+  private onSmartDropOpen(channel: number, evt: number, openType: number, userIndex: number | undefined): void {
+    const deviceSerial = this._getDeviceSerial(channel);
+    if (deviceSerial !== undefined) {
+      this.emit("smartdrop open", deviceSerial, evt, openType, userIndex);
+    }
+  }
+
+  private onSmartDropDeliveryCount(channel: number, num: number): void {
+    const deviceSerial = this._getDeviceSerial(channel);
+    if (deviceSerial !== undefined) {
+      this.emit("smartdrop delivery count", deviceSerial, num);
     }
   }
 

@@ -236,7 +236,7 @@ export enum SmartDropOpen {
 export enum SmartDropOpenedBy {
   APP = 1,
   PIN = 2,
-  WITHOUT_KEY = 3,
+  CARRIER = 3,
   EMERGENCY_RELEASE_BUTTON = 4,
   KEY = 5,
 }

@@ -70,6 +70,8 @@ export interface P2PClientProtocolEvents {
   "storage info hb3": (channel: number, storageInfo: StorageInfoBodyHB3) => void;
   "sequence error": (channel: number, command: number, sequence: number, serialnumber: string) => void;
   "hub notify update": () => void;
+  "smartdrop open": (channel: number, evt: number, openType: number, userIndex: number | undefined) => void;
+  "smartdrop delivery count": (channel: number, num: number) => void;
 }
 
 export interface P2PQueueMessage {

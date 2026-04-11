@@ -72,6 +72,18 @@ export class ParameterHelper {
         }
         return parsedValue;
       } else if (ParameterHelper.JSON_PARSE_PLAIN_PARAMS.has(type)) {
+        const trimmed = value.trim();
+        if (
+          (trimmed.startsWith("{") && !trimmed.endsWith("}")) ||
+          (trimmed.startsWith("[") && !trimmed.endsWith("]"))
+        ) {
+          log.debug("Truncated JSON parameter value received from eufy cloud. Will be ignored.", {
+            serialNumber: serialNumber,
+            type: type,
+            value: value,
+          });
+          return undefined;
+        }
         const parsedValue = parseJSON(value, log);
         if (parsedValue === undefined) {
           log.debug("Non-parsable parameter value received from eufy cloud. Will be ignored.", {

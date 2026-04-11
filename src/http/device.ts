@@ -6213,37 +6213,50 @@ export class SmartDrop extends Camera {
               case SmartDropOpen.OPEN:
                 // Open
                 this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "1", "push");
+                this.updateProperty(PropertyName.DeviceTimesOpened, ((this.getPropertyValue(PropertyName.DeviceTimesOpened) as number) || 0) + 1);
                 switch (message.openType) {
                   case SmartDropOpenedBy.APP:
                     // Open remotely via App
                     this.updateProperty(PropertyName.DeviceOpenedByType, 1);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 1);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
                     break;
                   case SmartDropOpenedBy.PIN:
                     // Open with PIN
                     if (message.pin === "0") {
-                      // Master PIN
+                      // Master PIN or press open (indistinguishable in push) — either way, owner is retrieving/checking
                       this.updateProperty(PropertyName.DeviceOpenedByType, 2);
+                      this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
+                      this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
+                      this.updateProperty(PropertyName.DevicePackageDelivered, false);
                     } else {
-                      // Delivery PIN
-                      // who: message.person_name
+                      // Delivery/access PIN — name from message.name (carrier name field)
+                      const pinName = message.name !== undefined ? message.name : (message.pin ?? "");
                       this.updateProperty(PropertyName.DeviceOpenedByType, 3);
-                      this.updateProperty(
-                        PropertyName.DeviceOpenedByName,
-                        message.person_name !== undefined ? message.person_name : ""
-                      );
+                      this.updateProperty(PropertyName.DeviceOpenedByName, pinName);
+                      this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
+                      this.updateProperty(PropertyName.DeviceLastOpenedByName, pinName);
                     }
                     break;
-                  case SmartDropOpenedBy.WITHOUT_KEY:
-                    // Opened without key
+                  case SmartDropOpenedBy.CARRIER:
+                    // Carrier delivery
                     this.updateProperty(PropertyName.DeviceOpenedByType, 4);
+                    this.updateProperty(PropertyName.DeviceOpenedByName, message.name !== undefined ? message.name : "");
+                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByName, message.name !== undefined ? message.name : "");
+                    this.updateProperty(PropertyName.DevicePackageDelivered, true);
                     break;
                   case SmartDropOpenedBy.EMERGENCY_RELEASE_BUTTON:
                     // Opened via emergency release button
                     this.updateProperty(PropertyName.DeviceOpenedByType, 5);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 5);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
                     break;
                   case SmartDropOpenedBy.KEY:
                     // Opened with key
                     this.updateProperty(PropertyName.DeviceOpenedByType, 6);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 6);
+                    this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
                     break;
                   default:
                     rootHTTPLogger.debug(
@@ -6403,6 +6416,47 @@ export class SmartDrop extends Camera {
     }
   }
 
+  public p2pOpenEvent(evt: number, openType: number, userIndex: number | undefined): void {
+    if (evt === 1) {
+      // Box opened
+      this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "1", "p2p");
+      this.updateProperty(PropertyName.DeviceTimesOpened, ((this.getPropertyValue(PropertyName.DeviceTimesOpened) as number) || 0) + 1);
+      if (openType === 3) {
+        // Carrier delivery (openType:3)
+        this.updateProperty(PropertyName.DeviceOpenedByType, 4);
+        this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
+        this.updateProperty(PropertyName.DevicePackageDelivered, true);
+      } else if (openType === 2) {
+        if (userIndex === 0) {
+          // Master PIN
+          this.updateProperty(PropertyName.DeviceOpenedByType, 2);
+          this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
+          this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
+          this.updateProperty(PropertyName.DevicePackageDelivered, false);
+        } else if (userIndex === undefined) {
+          // Press open (no PIN, no userIndex) — box assumed empty
+          this.updateProperty(PropertyName.DeviceOpenedByType, 2);
+          this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
+          this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
+          this.updateProperty(PropertyName.DevicePackageDelivered, false);
+        } else {
+          // Delivery/access code (non-zero userIndex) — defer delivery state to cmd 6246
+          this.updateProperty(PropertyName.DeviceOpenedByType, 3);
+          this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
+          this.updateProperty(PropertyName.DeviceLastOpenedByName, String(userIndex));
+          this.updateProperty(PropertyName.DeviceOpenedByName, String(userIndex));
+        }
+      }
+    } else if (evt === 2) {
+      // Box closed
+      this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "0", "p2p");
+    }
+  }
+
+  public p2pDeliveryCountEvent(num: number): void {
+    this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, String(num), "p2p");
+  }
+
   protected handlePropertyChange(
     metadata: PropertyMetadataAny,
     oldValue: PropertyValue,
@@ -6419,6 +6473,9 @@ export class SmartDrop extends Camera {
     } else if (metadata.name === PropertyName.DeviceDeliveries) {
       this.updateProperty(PropertyName.DevicePackageDelivered, (newValue as number) > 0);
     } else if (metadata.name === PropertyName.DevicePackageDelivered) {
+      if ((newValue as boolean) === false) {
+        this.updateProperty(PropertyName.DeviceTimesOpened, 0);
+      }
       this.emit("package delivered", this, newValue as boolean);
     } else if (metadata.name === PropertyName.DeviceLowBatteryAlert) {
       this.emit("low battery", this, newValue as boolean);

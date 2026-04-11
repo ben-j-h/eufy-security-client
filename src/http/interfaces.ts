@@ -274,6 +274,8 @@ export interface StationEvents {
   "garage door status": (station: Station, channel: number, doorId: number, status: number) => void;
   "storage info hb3": (station: Station, channel: number, storageInfo: StorageInfoBodyHB3) => void;
   "hub notify update": (station: Station) => void;
+  "smartdrop open": (deviceSN: string, evt: number, openType: number, userIndex: number | undefined) => void;
+  "smartdrop delivery count": (deviceSN: string, num: number) => void;
 }
 
 export interface DeviceEvents {

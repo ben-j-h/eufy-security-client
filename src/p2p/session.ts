@@ -2770,6 +2770,56 @@ export class P2PClientProtocol extends TypedEmitter<P2PClientProtocolEvents> {
             });
           }
           break;
+        case CommandType.SUB1G_REP_SMARTDROP_OPEN:
+          try {
+            rootP2PLogger.debug(`Handle DATA ${P2PDataType[message.dataType]} - SUB1G_REP_SMARTDROP_OPEN`, {
+              stationSN: this.rawStation.station_sn,
+              payload: data.toString(),
+            });
+            const openPayload = JSON.parse(data.toString()) as { evt: number; openType?: number; userIndex?: number };
+            this.emit("smartdrop open", message.channel, openPayload.evt, openPayload.openType ?? 0, openPayload.userIndex);
+          } catch (err) {
+            const error = ensureError(err);
+            rootP2PLogger.error(`Handle DATA ${P2PDataType[message.dataType]} - SUB1G_REP_SMARTDROP_OPEN - Error`, {
+              error: getError(error),
+              stationSN: this.rawStation.station_sn,
+              message: {
+                seqNo: message.seqNo,
+                channel: message.channel,
+                commandType: CommandType[message.commandId],
+                signCode: message.signCode,
+                type: message.type,
+                dataType: P2PDataType[message.dataType],
+                data: message.data.toString("hex"),
+              },
+            });
+          }
+          break;
+        case CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT:
+          try {
+            rootP2PLogger.debug(`Handle DATA ${P2PDataType[message.dataType]} - SUB1G_REP_SMARTDROP_DELIVERY_COUNT`, {
+              stationSN: this.rawStation.station_sn,
+              payload: data.toString(),
+            });
+            const deliveryPayload = JSON.parse(data.toString()) as { num: number };
+            this.emit("smartdrop delivery count", message.channel, deliveryPayload.num);
+          } catch (err) {
+            const error = ensureError(err);
+            rootP2PLogger.error(`Handle DATA ${P2PDataType[message.dataType]} - SUB1G_REP_SMARTDROP_DELIVERY_COUNT - Error`, {
+              error: getError(error),
+              stationSN: this.rawStation.station_sn,
+              message: {
+                seqNo: message.seqNo,
+                channel: message.channel,
+                commandType: CommandType[message.commandId],
+                signCode: message.signCode,
+                type: message.type,
+                dataType: P2PDataType[message.dataType],
+                data: message.data.toString("hex"),
+              },
+            });
+          }
+          break;
         case CommandType.CMD_SET_FLOODLIGHT_MANUAL_SWITCH:
           try {
             const enabled = data.readUIntBE(0, 1) === 1 ? true : false;
