@@ -3167,7 +3167,16 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
   private onStationSmartDropOpen(deviceSN: string, evt: number, openType: number, userIndex: number | undefined): void {
     this.getDevice(deviceSN)
       .then((device: Device) => {
-        if (device.isSmartDrop()) (device as SmartDrop).p2pOpenEvent(evt, openType, userIndex);
+        if (device.isSmartDrop()) {
+          (device as SmartDrop).p2pOpenEvent(evt, openType, userIndex);
+          if (evt === 1) {
+            this.getStation(device.getStationSerial())
+              .then((station: Station) => {
+                (device as SmartDrop).triggerPictureLoad(station);
+              })
+              .catch(() => {});
+          }
+        }
       })
       .catch((err) => {
         const error = ensureError(err);

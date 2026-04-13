@@ -102,6 +102,7 @@ import {
   isSmartLockNotification,
   isT8170DetectionModeEnabled,
   loadEventImage,
+  loadImageOverP2P,
   WritePayload,
   isT8110DetectionModeEnabled,
 } from "./utils";
@@ -6485,6 +6486,10 @@ export class SmartDrop extends Camera {
 
   public p2pDeliveryCountEvent(num: number): void {
     this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, String(num), "p2p");
+  }
+
+  public triggerPictureLoad(station: Station): void {
+    loadImageOverP2P(station, this, this.getSerial(), this.pictureEventTimeouts);
   }
 
   protected handlePropertyChange(
