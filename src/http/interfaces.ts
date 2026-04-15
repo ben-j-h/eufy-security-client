@@ -188,6 +188,7 @@ export interface ImageType {
 export interface Picture {
   data: Buffer;
   type: ImageType;
+  time?: string; // ISO-8601 timestamp parsed from the image filename (local station time)
 }
 
 export interface HTTPApiEvents {

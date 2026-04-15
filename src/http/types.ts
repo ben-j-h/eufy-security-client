@@ -882,6 +882,7 @@ export enum PropertyName {
   DeviceIsDeliveryDenied = "isDeliveryDenied",
   DeviceHasMasterPin = "hasMasterPin",
   DeviceDeliveries = "deliveries",
+  DeviceDeliveryPicture = "deliveryPicture",
 
   DeviceHiddenMotionDetectionSensitivity = "hidden-motionDetectionSensitivity",
   DeviceHiddenMotionDetectionMode = "hidden-motionDetectionMode",
@@ -4445,6 +4446,16 @@ export const DevicePictureProperty: PropertyMetadataObject = {
   key: "custom_picture",
   name: PropertyName.DevicePicture,
   label: "Last Camera Picture",
+  readable: true,
+  writeable: false,
+  type: "object",
+  default: null,
+};
+
+export const DeviceDeliveryPictureProperty: PropertyMetadataObject = {
+  key: "custom_deliveryPicture",
+  name: PropertyName.DeviceDeliveryPicture,
+  label: "Last Delivery Picture",
   readable: true,
   writeable: false,
   type: "object",
@@ -8395,6 +8406,7 @@ export const DeviceProperties: Properties = {
     [PropertyName.DeviceHasMasterPin]: DeviceHasMasterPinProperty,
     [PropertyName.DeviceDeliveries]: DeviceDeliveriesProperty,
     [PropertyName.DevicePackageDelivered]: DevicePackageDeliveredProperty,
+    [PropertyName.DeviceDeliveryPicture]: DeviceDeliveryPictureProperty,
   },
   [DeviceType.WALL_LIGHT_CAM]: {
     ...GenericDeviceProperties,

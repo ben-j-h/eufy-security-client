@@ -3169,7 +3169,12 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
       .then((device: Device) => {
         if (device.isSmartDrop()) {
           (device as SmartDrop).p2pOpenEvent(evt, openType, userIndex);
-          if (evt === 1) {
+          // Trigger picture load on CLOSE (evt=2), not open.
+          // The thumbnail is generated only after the recording is finalized,
+          // which happens after the box closes. The 60-second delay in
+          // triggerPictureLoad then gives the station time to write the file
+          // before we query the DB.
+          if (evt === 2) {
             this.getStation(device.getStationSerial())
               .then((station: Station) => {
                 (device as SmartDrop).triggerPictureLoad(station);
@@ -3585,6 +3590,13 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
   }
 
   private _emitStationImageDownload(station: Station, file: string, picture: Picture): void {
+    // Parse capture timestamp from filename, e.g. "20260412133039_c00.jpg" → 2026-04-12T13:30:39
+    const tsMatch = /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(path.basename(file));
+    if (tsMatch) {
+      const [, yr, mo, dy, hr, mn, sc] = tsMatch;
+      picture.time = `${yr}-${mo}-${dy}T${hr}:${mn}:${sc}`;
+    }
+
     this.emit("station image download", station, file, picture);
 
     this.getDevicesFromStation(station.getSerial())
@@ -3595,6 +3607,13 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
               `onStationImageDownload - Set picture for device ${device.getSerial()} file: ${file} picture_ext: ${picture.type.ext} picture_mime: ${picture.type.mime}`
             );
             device.updateProperty(PropertyName.DevicePicture, picture);
+            if (device.isSmartDrop()) {
+              const sd = device as SmartDrop;
+              if (sd.isDeliveryThumb(file)) {
+                sd.clearDeliveryThumb(file);
+                device.updateProperty(PropertyName.DeviceDeliveryPicture, picture);
+              }
+            }
             break;
           }
         }
