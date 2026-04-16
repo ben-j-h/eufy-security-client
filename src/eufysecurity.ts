@@ -3590,8 +3590,12 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
   }
 
   private _emitStationImageDownload(station: Station, file: string, picture: Picture): void {
+    // The station returns the full SD card path, e.g. "/media/mmcblk0p1/video/20260412133039_c00.jpg".
+    // DevicePictureUrl is set to the bare filename only, so normalise to basename for all comparisons.
+    const filename = path.basename(file);
+
     // Parse capture timestamp from filename, e.g. "20260412133039_c00.jpg" → 2026-04-12T13:30:39
-    const tsMatch = /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(path.basename(file));
+    const tsMatch = /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(filename);
     if (tsMatch) {
       const [, yr, mo, dy, hr, mn, sc] = tsMatch;
       picture.time = `${yr}-${mo}-${dy}T${hr}:${mn}:${sc}`;
@@ -3602,15 +3606,15 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     this.getDevicesFromStation(station.getSerial())
       .then((devices: Device[]) => {
         for (const device of devices) {
-          if (device.getPropertyValue(PropertyName.DevicePictureUrl) === file) {
+          if (device.getPropertyValue(PropertyName.DevicePictureUrl) === filename) {
             rootMainLogger.debug(
               `onStationImageDownload - Set picture for device ${device.getSerial()} file: ${file} picture_ext: ${picture.type.ext} picture_mime: ${picture.type.mime}`
             );
             device.updateProperty(PropertyName.DevicePicture, picture);
             if (device.isSmartDrop()) {
               const sd = device as SmartDrop;
-              if (sd.isDeliveryThumb(file)) {
-                sd.clearDeliveryThumb(file);
+              if (sd.isDeliveryThumb(filename)) {
+                sd.clearDeliveryThumb(filename);
                 device.updateProperty(PropertyName.DeviceDeliveryPicture, picture);
               }
             }
