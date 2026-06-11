@@ -3169,18 +3169,6 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
       .then((device: Device) => {
         if (device.isSmartDrop()) {
           (device as SmartDrop).p2pOpenEvent(evt, openType, userIndex);
-          // Trigger picture load on CLOSE (evt=2), not open.
-          // The thumbnail is generated only after the recording is finalized,
-          // which happens after the box closes. The 60-second delay in
-          // triggerPictureLoad then gives the station time to write the file
-          // before we query the DB.
-          if (evt === 2) {
-            this.getStation(device.getStationSerial())
-              .then((station: Station) => {
-                (device as SmartDrop).triggerPictureLoad(station);
-              })
-              .catch(() => {});
-          }
         }
       })
       .catch((err) => {
@@ -3606,18 +3594,12 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     this.getDevicesFromStation(station.getSerial())
       .then((devices: Device[]) => {
         for (const device of devices) {
-          if (device.getPropertyValue(PropertyName.DevicePictureUrl) === filename) {
+          const deviceUrl = (device.getPropertyValue(PropertyName.DevicePictureUrl) as string) ?? "";
+          if (deviceUrl === file || path.basename(deviceUrl) === filename) {
             rootMainLogger.debug(
               `onStationImageDownload - Set picture for device ${device.getSerial()} file: ${file} picture_ext: ${picture.type.ext} picture_mime: ${picture.type.mime}`
             );
             device.updateProperty(PropertyName.DevicePicture, picture);
-            if (device.isSmartDrop()) {
-              const sd = device as SmartDrop;
-              if (sd.isDeliveryThumb(filename)) {
-                sd.clearDeliveryThumb(filename);
-                device.updateProperty(PropertyName.DeviceDeliveryPicture, picture);
-              }
-            }
             break;
           }
         }
@@ -3633,6 +3615,10 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
   }
 
   private onStationImageDownload(station: Station, file: string, image: Buffer): void {
+    if (!image || image.length === 0) {
+      rootMainLogger.debug(`onStationImageDownload - empty buffer for file: ${file}, skipping`);
+      return;
+    }
     import("image-type")
       .then(({ default: imageType }) => {
         imageType(image)
@@ -3663,6 +3649,12 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     returnCode: DatabaseReturnCode,
     data: Array<DatabaseQueryLatestInfo>
   ): void {
+    rootMainLogger.debug("SMARTDROP DB DUMP - databaseQueryLatestInfo result", {
+      stationSN: station.getSerial(),
+      returnCode: returnCode,
+      recordCount: data.length,
+      records: data.map((r) => ({ ...r })),
+    });
     if (returnCode === DatabaseReturnCode.SUCCESSFUL) {
       for (const element of data) {
         if (
@@ -3672,12 +3664,17 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
           this.getDevice(element.device_sn)
             .then((device) => {
               const raw = device.getRawDevice();
+              let localCropPath: string | undefined;
               if ("crop_local_path" in element) {
-                raw.cover_path = (element as DatabaseQueryLatestInfoLocal).crop_local_path;
+                localCropPath = (element as DatabaseQueryLatestInfoLocal).crop_local_path;
+                raw.cover_path = localCropPath;
               } else if ("crop_cloud_path" in element) {
                 raw.cover_path = (element as DatabaseQueryLatestInfoCloud).crop_cloud_path;
               }
               device.update(raw);
+              if (localCropPath && station.hasCommand(CommandName.StationDownloadImage)) {
+                station.downloadImage(localCropPath);
+              }
             })
             .catch((err) => {
               const error = ensureError(err);
@@ -3700,6 +3697,18 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     returnCode: DatabaseReturnCode,
     data: Array<DatabaseQueryLocal>
   ): void {
+    rootMainLogger.debug("SMARTDROP DB DUMP - databaseQueryLocal result", {
+      stationSN: station.getSerial(),
+      returnCode: returnCode,
+      recordCount: data.length,
+      records: data.map((r) => ({
+        record_id: r.record_id,
+        station_sn: r.station_sn,
+        device_sn: r.device_sn,
+        history: r.history,
+        picture: r.picture,
+      })),
+    });
     this.emit("station database query local", station, returnCode, data);
   }
 

@@ -936,11 +936,16 @@ export const isSmartLockNotification = function (value: number, mode: SmartLockN
 export const getWaitSeconds = (device: Device): number => {
   let seconds = 60;
   const workingMode = device.getPropertyValue(PropertyName.DevicePowerWorkingMode);
+  const clipLength = device.getPropertyValue(PropertyName.DeviceRecordingClipLength) as number | undefined;
   if (workingMode !== undefined && workingMode === 2) {
-    const customValue = device.getPropertyValue(PropertyName.DeviceRecordingClipLength);
-    if (customValue !== undefined) {
-      seconds = customValue as number;
+    if (clipLength !== undefined) {
+      seconds = clipLength;
     }
+  } else if (clipLength !== undefined) {
+    // Wait until the recording finishes plus a buffer for the HB3 to write the file and update history_record_info.
+    // The timer resets on every push; the last push (close) arrives ~seconds after the open, so the recording
+    // is still in progress when the timer starts. Add 60s of write buffer on top of the clip length.
+    seconds = clipLength + 60;
   }
   return seconds;
 };

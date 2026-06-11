@@ -6195,15 +6195,6 @@ export class DoorbellLock extends DoorbellCamera {
   }
 }
 export class SmartDrop extends Camera {
-  // Thumbnail filename derived from push file_path; consumed by triggerPictureLoad on CLOSE.
-  private pendingThumbPath: string | null = null;
-  // Whether the pending thumb came from a delivery event (vs motion/person).
-  private pendingThumbIsDelivery = false;
-  // Active retry timer IDs; cancelled when a newer event supersedes them.
-  private thumbRetryTimers: NodeJS.Timeout[] = [];
-  // Filenames of in-flight delivery downloads; used to also update DeviceDeliveryPicture.
-  private deliveryThumbFilenames = new Set<string>();
-
   static async getInstance(api: HTTPApi, device: DeviceListResponse, deviceConfig: DeviceConfig): Promise<SmartDrop> {
     return new SmartDrop(api, device, deviceConfig);
   }
@@ -6212,101 +6203,34 @@ export class SmartDrop extends Camera {
     return "boxes";
   }
 
-  private cancelThumbRetries(): void {
-    this.thumbRetryTimers.forEach(t => clearTimeout(t));
-    this.thumbRetryTimers = [];
-  }
-
-  /** Returns true if the given filename was scheduled as part of a delivery event. */
-  public isDeliveryThumb(filename: string): boolean {
-    return this.deliveryThumbFilenames.has(filename);
-  }
-
-  /** Called by eufysecurity.ts after DeviceDeliveryPicture has been updated. */
-  public clearDeliveryThumb(filename: string): void {
-    this.deliveryThumbFilenames.delete(filename);
-  }
-
-  /**
-   * Schedule a direct thumbnail download with retries. All timer IDs are stored
-   * synchronously so cancelThumbRetries() can safely cancel them at any time.
-   *
-   * - Attempt 0 (initialDelayMs): sets DevicePictureUrl (force), triggering downloadImage
-   *   via the eufysecurity.ts property-changed handler.
-   * - Attempts 1–3 (+2min, +5min, +10min after initial): call station.downloadImage() directly.
-   *   Longer delays are needed because the station can take several minutes to finalize the
-   *   recording and write the thumbnail to the SD card after the event.
-   *
-   * @param isDelivery  true for delivery events — also updates DeviceDeliveryPicture on success.
-   */
-  private scheduleThumbRetries(station: Station, thumbnailFilename: string, initialDelayMs: number, isDelivery = false): void {
-    this.cancelThumbRetries();
-    if (isDelivery) {
-      this.deliveryThumbFilenames.add(thumbnailFilename);
-    }
-    [initialDelayMs, initialDelayMs + 120_000, initialDelayMs + 300_000, initialDelayMs + 600_000].forEach((delay, index) => {
-      const t = setTimeout(() => {
-        try {
-          if (index === 0) {
-            // First attempt: set DevicePictureUrl (force=true bypasses dedup), which triggers
-            // station.downloadImage() in the eufysecurity.ts property-changed handler.
-            this.updateProperty(PropertyName.DevicePictureUrl, thumbnailFilename, true);
-          } else if (this.getPropertyValue(PropertyName.DevicePictureUrl) === thumbnailFilename) {
-            // Retry: DevicePictureUrl already set; call downloadImage directly.
-            if (station.hasCommand(CommandName.StationDownloadImage)) {
-              station.downloadImage(thumbnailFilename);
-            }
-          }
-        } catch (err) {
-          // swallow — a failed retry is harmless
-        }
-      }, delay);
-      this.thumbRetryTimers.push(t);
-    });
-  }
-
   public processPushNotification(station: Station, message: PushMessage, eventDurationSeconds: number): void {
     super.processPushNotification(station, message, eventDurationSeconds);
     if (message.type !== undefined && message.event_type !== undefined) {
       if (message.device_sn === this.getSerial()) {
         try {
-          // SmartDrop records H264 video — pic_url is always empty and databaseQueryLatestInfo
-          // returns an empty crop_hb3_path for SmartDrop, so the standard loadEventImage path
-          // never updates the picture. Bypass it: derive the thumbnail filename directly from
-          // file_path and retry station.downloadImage() until the file exists on the SD card.
-          if (!isEmpty(message.file_path) && message.file_path!.startsWith("h264_")) {
-            const timestamp = message.file_path!.slice("h264_".length);
-            const thumbnailFilename = `${timestamp}_c00.jpg`;
-            // Cancel any databaseQueryLatestInfo timer queued by super.processPushNotification.
-            const pending = this.pictureEventTimeouts.get(this.getSerial());
-            if (pending !== undefined) {
-              clearTimeout(pending);
-              this.pictureEventTimeouts.delete(this.getSerial());
-            }
-            if (message.event_type !== CusPushEvent.SMART_DROP) {
-              // Motion/person event: no P2P close event will come, so schedule retries now.
-              // Give the station 2 min to finalize the recording and write the thumbnail.
-              this.pendingThumbPath = thumbnailFilename;
-              this.pendingThumbIsDelivery = false;
-              this.scheduleThumbRetries(station, thumbnailFilename, 120_000, false);
-            } else {
-              // Delivery event: normally triggerPictureLoad is called on P2P close (evt=2).
-              // But if the server was down when the box closed, that P2P event was missed and
-              // we'd wait forever. If the push is stale (older than 2 min), the close already
-              // happened — schedule retries immediately.
-              const eventAgeMs = Date.now() - message.event_time;
-              if (eventAgeMs > 120_000) {
-                // Stale push: close happened while server was down, skip wait
-                this.scheduleThumbRetries(station, thumbnailFilename, 0, true);
-              } else {
-                // Fresh push: wait for P2P close for best timing
-                this.pendingThumbPath = thumbnailFilename;
-                this.pendingThumbIsDelivery = true;
-              }
-            }
-          } else {
-            // No h264_ file_path — fall back to the standard loadEventImage path.
-            loadEventImage(station, this.api, this, message, this.pictureEventTimeouts);
+          // SmartDrop records H264 video only — no JPEG thumbnails exist on the SD card.
+          // Query the station DB on any SmartDrop push to find real storage_path / thumb_path.
+          // Fire on every push for this device — try both device serial and station serial as filters,
+          // and a wide window, to diagnose what the DB actually contains.
+          try {
+            const eventMs = message.event_time;
+            const startDate = new Date(eventMs - 60 * 60 * 1000); // 1 hour back
+            const endDate = new Date(eventMs + 5 * 60 * 1000);
+            rootHTTPLogger.debug("SmartDrop - firing databaseQueryLocal diagnostic", {
+              deviceSN: this.getSerial(),
+              stationSN: station.getSerial(),
+              eventType: message.event_type,
+              startDate: startDate.toISOString(),
+              endDate: endDate.toISOString(),
+            });
+            // Try device serial first
+            station.databaseQueryLocal([this.getSerial()], startDate, endDate);
+            // Also try station serial — some HB3 models store records under station SN
+            station.databaseQueryLocal([station.getSerial()], startDate, endDate);
+            // Also try with no filter (empty = all devices)
+            station.databaseQueryLocal([], startDate, endDate);
+          } catch (dbErr) {
+            rootHTTPLogger.debug("SmartDrop - databaseQueryLocal failed", { error: dbErr });
           }
           if (message.event_type === CusPushEvent.SMART_DROP) {
             switch (message.open) {
@@ -6330,8 +6254,8 @@ export class SmartDrop extends Camera {
                       this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
                       this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
                     } else {
-                      // Delivery/access PIN — use person_name (carrier ID, e.g. "USPS") over notification name
-                      const pinName = !isEmpty(message.person_name) ? message.person_name! : (message.name ?? (message.pin ?? ""));
+                      // Delivery/access PIN — use person_name (carrier ID, e.g. "USPS"); message.name is the device label, not carrier
+                      const pinName = message.person_name ?? (message.pin ?? "");
                       this.updateProperty(PropertyName.DeviceOpenedByType, 3);
                       this.updateProperty(PropertyName.DeviceOpenedByName, pinName);
                       this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
@@ -6354,8 +6278,8 @@ export class SmartDrop extends Camera {
                     }
                     break;
                   case SmartDropOpenedBy.CARRIER: {
-                    // Carrier delivery — use person_name (carrier ID, e.g. "USPS") over notification name
-                    const carrierName = !isEmpty(message.person_name) ? message.person_name! : (message.name ?? "");
+                    // Carrier delivery — use person_name (carrier ID, e.g. "USPS"); message.name is the device label, not carrier
+                    const carrierName = message.person_name ?? "";
                     this.updateProperty(PropertyName.DeviceOpenedByType, 4);
                     this.updateProperty(PropertyName.DeviceOpenedByName, carrierName);
                     this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
@@ -6455,6 +6379,31 @@ export class SmartDrop extends Camera {
                 );
                 break;
             }
+            const existingTimeout = this.pictureEventTimeouts.get(this.getSerial());
+            if (existingTimeout !== undefined) {
+              clearTimeout(existingTimeout);
+              this.pictureEventTimeouts.delete(this.getSerial());
+            }
+            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDownloadImage)) {
+              // Delivery event: push carries the HB3 recording filename; download its crop thumbnail directly.
+              // Both open and close pushes carry the same file_path for the session, so the timer resets
+              // on every push (correct behavior) and always points to the right file.
+              const filePath = message.file_path!;
+              const seconds = getWaitSeconds(this);
+              const deviceSn = this.getSerial();
+              this.pictureEventTimeouts.set(
+                deviceSn,
+                setTimeout(async () => {
+                  const thumbPath = `/media/mmcblk0p1/video/${filePath}_c00.jpg`;
+                  rootHTTPLogger.debug("SmartDrop - attempting delivery thumbnail download", { thumbPath, filePath, waitSeconds: seconds });
+                  this.updateProperty(PropertyName.DevicePictureUrl, thumbPath);
+                  station.downloadImage(thumbPath);
+                  this.pictureEventTimeouts.delete(deviceSn);
+                }, seconds * 1000)
+              );
+            } else {
+              loadImageOverP2P(station, this, this.getSerial(), this.pictureEventTimeouts);
+            }
           } else if (message.event_type !== 0) {
             switch (message.event_type) {
               case SmartDropPushEvent.LOW_BATTERY:
@@ -6548,9 +6497,8 @@ export class SmartDrop extends Camera {
 
   public p2pOpenEvent(evt: number, openType: number, userIndex: number | undefined): void {
     if (evt === 1) {
-      // Box opened
+      // Box opened — timesOpened is incremented by the push handler; don't also increment here (P2P and push both fire for every open)
       this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "1", "p2p");
-      this.updateProperty(PropertyName.DeviceTimesOpened, ((this.getPropertyValue(PropertyName.DeviceTimesOpened) as number) || 0) + 1);
       if (openType === 3) {
         // Carrier delivery (openType:3)
         this.updateProperty(PropertyName.DeviceOpenedByType, 4);
@@ -6585,21 +6533,6 @@ export class SmartDrop extends Camera {
 
   public p2pDeliveryCountEvent(num: number): void {
     this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, String(num), "p2p");
-  }
-
-  public triggerPictureLoad(station: Station): void {
-    const pendingPath = this.pendingThumbPath;
-    const isDelivery = this.pendingThumbIsDelivery;
-    if (pendingPath !== null) {
-      this.pendingThumbPath = null;
-      this.pendingThumbIsDelivery = false;
-      // Box just closed — attempt download immediately, then retry at +2min/+5min/+10min
-      // because the station needs time to finalize the recording and write the thumbnail.
-      this.scheduleThumbRetries(station, pendingPath, 0, isDelivery);
-    } else {
-      // No pending thumbnail from push (e.g. push arrived after close, or CLOSE-only event).
-      loadImageOverP2P(station, this, this.getSerial(), this.pictureEventTimeouts);
-    }
   }
 
   protected handlePropertyChange(
