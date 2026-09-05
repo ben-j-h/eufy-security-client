@@ -646,6 +646,10 @@ export enum PropertyName {
   DeviceWatermark = "watermark",
   DevicePictureUrl = "hidden-pictureUrl",
   DevicePicture = "picture",
+  DeviceDeliveryThumbnailUrl = "hidden-deliveryThumbnailUrl",
+  DeviceDeliveryThumbnail = "deliveryThumbnail",
+  DeviceDeliveryCropUrl = "hidden-deliveryCropUrl",
+  DeviceDeliveryCrop = "deliveryCrop",
   DeviceState = "state",
   DevicePetDetection = "petDetection",
   DevicePetDetected = "petDetected",
@@ -4445,6 +4449,44 @@ export const DevicePictureProperty: PropertyMetadataObject = {
   key: "custom_picture",
   name: PropertyName.DevicePicture,
   label: "Last Camera Picture",
+  readable: true,
+  writeable: false,
+  type: "object",
+  default: null,
+};
+
+export const DeviceDeliveryThumbnailUrlProperty: PropertyMetadataString = {
+  key: "custom_delivery_thumb_url",
+  name: PropertyName.DeviceDeliveryThumbnailUrl,
+  label: "Last Delivery Thumbnail URL",
+  readable: true,
+  writeable: false,
+  type: "string",
+};
+
+export const DeviceDeliveryThumbnailProperty: PropertyMetadataObject = {
+  key: "custom_delivery_thumb",
+  name: PropertyName.DeviceDeliveryThumbnail,
+  label: "Last Delivery Thumbnail",
+  readable: true,
+  writeable: false,
+  type: "object",
+  default: null,
+};
+
+export const DeviceDeliveryCropUrlProperty: PropertyMetadataString = {
+  key: "custom_delivery_crop_url",
+  name: PropertyName.DeviceDeliveryCropUrl,
+  label: "Last Delivery Crop URL",
+  readable: true,
+  writeable: false,
+  type: "string",
+};
+
+export const DeviceDeliveryCropProperty: PropertyMetadataObject = {
+  key: "custom_delivery_crop",
+  name: PropertyName.DeviceDeliveryCrop,
+  label: "Last Delivery Crop",
   readable: true,
   writeable: false,
   type: "object",
@@ -8362,6 +8404,10 @@ export const DeviceProperties: Properties = {
     [PropertyName.DevicePersonDetected]: DevicePersonDetectedProperty,
     [PropertyName.DevicePicture]: DevicePictureProperty,
     [PropertyName.DevicePictureUrl]: DevicePictureUrlProperty,
+    [PropertyName.DeviceDeliveryThumbnail]: DeviceDeliveryThumbnailProperty,
+    [PropertyName.DeviceDeliveryThumbnailUrl]: DeviceDeliveryThumbnailUrlProperty,
+    [PropertyName.DeviceDeliveryCrop]: DeviceDeliveryCropProperty,
+    [PropertyName.DeviceDeliveryCropUrl]: DeviceDeliveryCropUrlProperty,
     [PropertyName.DeviceWifiSignalLevel]: DeviceWifiSignalLevelProperty,
     [PropertyName.DeviceBattery]: DeviceBatteryProperty,
     [PropertyName.DevicePowerWorkingMode]: DevicePowerWorkingModeSmartDropProperty,

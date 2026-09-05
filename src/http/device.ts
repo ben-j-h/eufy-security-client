@@ -83,7 +83,7 @@ import {
   PropertyMetadataObject,
   DeviceConfig,
 } from "./interfaces";
-import { CommandType, ESLAnkerBleConstant, TrackerCommandType } from "../p2p/types";
+import { CommandType, ESLAnkerBleConstant, FilterDetectType, FilterEventType, TrackerCommandType } from "../p2p/types";
 import {
   calculateCellularSignalLevel,
   calculateWifiSignalLevel,
@@ -103,6 +103,7 @@ import {
   isT8170DetectionModeEnabled,
   loadEventImage,
   loadImageOverP2P,
+  getWaitSeconds,
   WritePayload,
   isT8110DetectionModeEnabled,
 } from "./utils";
@@ -6195,6 +6196,8 @@ export class DoorbellLock extends DoorbellCamera {
   }
 }
 export class SmartDrop extends Camera {
+  public deliveryPicturePending = false;
+
   static async getInstance(api: HTTPApi, device: DeviceListResponse, deviceConfig: DeviceConfig): Promise<SmartDrop> {
     return new SmartDrop(api, device, deviceConfig);
   }
@@ -6209,29 +6212,6 @@ export class SmartDrop extends Camera {
       if (message.device_sn === this.getSerial()) {
         try {
           // SmartDrop records H264 video only — no JPEG thumbnails exist on the SD card.
-          // Query the station DB on any SmartDrop push to find real storage_path / thumb_path.
-          // Fire on every push for this device — try both device serial and station serial as filters,
-          // and a wide window, to diagnose what the DB actually contains.
-          try {
-            const eventMs = message.event_time;
-            const startDate = new Date(eventMs - 60 * 60 * 1000); // 1 hour back
-            const endDate = new Date(eventMs + 5 * 60 * 1000);
-            rootHTTPLogger.debug("SmartDrop - firing databaseQueryLocal diagnostic", {
-              deviceSN: this.getSerial(),
-              stationSN: station.getSerial(),
-              eventType: message.event_type,
-              startDate: startDate.toISOString(),
-              endDate: endDate.toISOString(),
-            });
-            // Try device serial first
-            station.databaseQueryLocal([this.getSerial()], startDate, endDate);
-            // Also try station serial — some HB3 models store records under station SN
-            station.databaseQueryLocal([station.getSerial()], startDate, endDate);
-            // Also try with no filter (empty = all devices)
-            station.databaseQueryLocal([], startDate, endDate);
-          } catch (dbErr) {
-            rootHTTPLogger.debug("SmartDrop - databaseQueryLocal failed", { error: dbErr });
-          }
           if (message.event_type === CusPushEvent.SMART_DROP) {
             switch (message.open) {
               case SmartDropOpen.OPEN:
@@ -6380,30 +6360,38 @@ export class SmartDrop extends Camera {
                 break;
             }
             const existingTimeout = this.pictureEventTimeouts.get(this.getSerial());
-            if (existingTimeout !== undefined) {
-              clearTimeout(existingTimeout);
-              this.pictureEventTimeouts.delete(this.getSerial());
-            }
-            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDownloadImage)) {
-              // Delivery event: push carries the HB3 recording filename; download its crop thumbnail directly.
-              // Both open and close pushes carry the same file_path for the session, so the timer resets
-              // on every push (correct behavior) and always points to the right file.
-              const filePath = message.file_path!;
+            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDatabaseQueryLocal)) {
+              // Delivery event with file_path: reset (or set) the delivery picture query timer.
+              // Both open and close pushes carry file_path, so the timer always resets to the latest push,
+              // ensuring we wait for the recording to finish before querying the database.
+              if (existingTimeout !== undefined) {
+                clearTimeout(existingTimeout);
+                this.pictureEventTimeouts.delete(this.getSerial());
+              }
               const seconds = getWaitSeconds(this);
               const deviceSn = this.getSerial();
+              const deliveryTime = new Date(message.event_time ?? Date.now());
               this.pictureEventTimeouts.set(
                 deviceSn,
-                setTimeout(async () => {
-                  const thumbPath = `/media/mmcblk0p1/video/${filePath}_c00.jpg`;
-                  rootHTTPLogger.debug("SmartDrop - attempting delivery thumbnail download", { thumbPath, filePath, waitSeconds: seconds });
-                  this.updateProperty(PropertyName.DevicePictureUrl, thumbPath);
-                  station.downloadImage(thumbPath);
+                setTimeout(() => {
+                  rootHTTPLogger.debug("SmartDrop - querying delivery picture from database", { deviceSn, waitSeconds: seconds });
+                  this.deliveryPicturePending = true;
+                  // Query history_record_info for this device with no detection-type filter.
+                  // SmartDrop recordings are stored as ALERT events (event_type=2); using FilterEventType.ALL=0
+                  // is interpreted by the HB3 as "type 0 only" and returns nothing.
+                  // Use a 2-day window (yesterday to tomorrow) to avoid timezone edge cases where
+                  // the HB3 local date differs from the container's UTC date.
+                  const startDate = new Date(deliveryTime.getTime() - 24 * 60 * 60 * 1000);
+                  const endDate = new Date(deliveryTime.getTime() + 24 * 60 * 60 * 1000);
+                  station.databaseQueryLocal([deviceSn], startDate, endDate, FilterEventType.ALL, FilterDetectType.NOT_SUPPORT);
                   this.pictureEventTimeouts.delete(deviceSn);
                 }, seconds * 1000)
               );
-            } else {
+            } else if (existingTimeout === undefined) {
+              // No file_path AND no pending delivery timer: fall back to latest motion picture.
               loadImageOverP2P(station, this, this.getSerial(), this.pictureEventTimeouts);
             }
+            // If no file_path but a delivery timer already exists, leave it alone.
           } else if (message.event_type !== 0) {
             switch (message.event_type) {
               case SmartDropPushEvent.LOW_BATTERY:

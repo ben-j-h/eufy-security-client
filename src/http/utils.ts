@@ -30,7 +30,7 @@ import {
   EufyCamC35DetectionTypes,
 } from "./types";
 import { HTTPApi } from "./api";
-import { spliceV2Image, V2_PREFIX } from "./decodeImageV2";
+import { spliceV2Image, V2_PREFIX, decodeV2ImageAuto } from "./decodeImageV2";
 import { ensureError } from "../error";
 import { ImageBaseCodeError } from "./error";
 import { LockPushEvent } from "./../push/types";
@@ -736,6 +736,77 @@ export const decodeImage = function (p2pDid: string, data: Buffer): Buffer {
     }
   }
   return data;
+};
+
+/**
+ * Try AES-128-ECB decryption of a v2_eufysecurity image using the same key
+ * derivation as the older `eufysecurity` format. If the derived key is correct
+ * the decrypted buffer is the complete original JPEG (real DQT tables + real
+ * dimensions) — no geometry brute-force needed and no quality substitution.
+ */
+const decodeV2ImageWithKey = function (data: Buffer, p2pDid: string): Buffer | null {
+  // Parse v2_eufysecurity:<SERIAL>:<PKT>:<binary>
+  // V2_PREFIX already includes the trailing ':', so serial starts at V2_PREFIX.length.
+  // Scan from there to find the two colons that delimit SERIAL and PKT.
+  const serialStart = V2_PREFIX.length;
+  let colonCount = 0;
+  let binaryOffset = -1;
+  let pktStart = -1;
+  let pktEnd = -1;
+  let serialEnd = -1;
+  for (let i = serialStart; i < data.length; i++) {
+    if (data[i] !== 0x3a) continue;
+    colonCount++;
+    if (colonCount === 1) { serialEnd = i; pktStart = i + 1; }
+    else if (colonCount === 2) { pktEnd = i; binaryOffset = i + 1; break; }
+  }
+  if (binaryOffset < 0 || serialEnd <= serialStart || pktEnd <= pktStart) return null;
+  const serial = data.subarray(serialStart, serialEnd).toString("latin1");
+  const pkt = data.subarray(pktStart, pktEnd).toString("latin1");
+  const binary = data.subarray(binaryOffset);
+  if (binary.length < 256) return null;
+  rootHTTPLogger.debug("decodeV2ImageWithKey - attempt", {
+    serial,
+    pkt,
+    p2pDid,
+    binaryLength: binary.length,
+    binaryHead: binary.subarray(0, 32).toString("hex"),
+  });
+  try {
+    const imageKey = getImageKey(serial, p2pDid, pkt);
+    const decipher = createDecipheriv("aes-128-ecb", Buffer.from(imageKey, "utf-8").subarray(0, 16), null);
+    decipher.setAutoPadding(false);
+    const decrypted = Buffer.concat([decipher.update(binary.subarray(0, 256)), decipher.final()]);
+    rootHTTPLogger.debug("decodeV2ImageWithKey - decrypted head", {
+      head: decrypted.subarray(0, 20).toString("hex"),
+      isJpeg: decrypted[0] === 0xff && decrypted[1] === 0xd8,
+    });
+    if (decrypted[0] !== 0xff || decrypted[1] !== 0xd8) return null; // not a JPEG SOI — wrong key
+    const full = Buffer.from(binary);
+    decrypted.copy(full);
+    rootHTTPLogger.info("decodeV2ImageWithKey - key-based JPEG decryption succeeded", { serial, pkt });
+    return full;
+  } catch (err) {
+    rootHTTPLogger.debug("decodeV2ImageWithKey - decryption failed", { err: String(err) });
+    return null;
+  }
+};
+
+/**
+ * Async variant of decodeImage that handles v2_eufysecurity: images at their
+ * actual resolution. Tries key-based AES-128-ECB decryption first (returns the
+ * original JPEG with real quantization tables); falls back to geometry
+ * brute-force via decodeV2ImageAuto if the key derivation doesn't match.
+ */
+export const decodeImageAsync = async function (p2pDid: string, data: Buffer): Promise<Buffer> {
+  if (data.length >= V2_PREFIX.length && data.subarray(0, V2_PREFIX.length).toString("latin1") === V2_PREFIX) {
+    const keyed = decodeV2ImageWithKey(data, p2pDid);
+    if (keyed) return keyed;
+    const result = await decodeV2ImageAuto(data);
+    if (result && !result.lowConfidence) return result.jpeg;
+    if (result) return result.jpeg;
+  }
+  return decodeImage(p2pDid, data);
 };
 
 export const getImagePath = function (path: string): string {

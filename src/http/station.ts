@@ -15451,7 +15451,11 @@ export class Station extends TypedEmitter<StationEvents> {
               detection_type: detectionType,
               device_info: devices,
               end_date: format(endDate, "YYYYMMDD"),
-              event_type: eventType,
+              // Omit event_type when 0: the HB3 treats 0 as "only type-0 records" not
+              // "all types", so passing 0 returns nothing for SmartDrop recordings.
+              // Omitting the field entirely matches what CMD_DATABASE_QUERY_LATEST_INFO
+              // does and lets the HB3 return all event types.
+              ...(eventType !== 0 ? { event_type: eventType } : {}),
               flag: 0,
               res_unzip: 1,
               start_date: format(startDate, "YYYYMMDD"),

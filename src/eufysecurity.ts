@@ -64,6 +64,7 @@ import {
   AlarmEvent,
   CommandType,
   DatabaseReturnCode,
+  FilterDetectType,
   P2PConnectionType,
   SmartSafeAlarm911Event,
   SmartSafeShakeAlarmEvent,
@@ -3594,13 +3595,21 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     this.getDevicesFromStation(station.getSerial())
       .then((devices: Device[]) => {
         for (const device of devices) {
-          const deviceUrl = (device.getPropertyValue(PropertyName.DevicePictureUrl) as string) ?? "";
-          if (deviceUrl === file || path.basename(deviceUrl) === filename) {
+          const matchUrl = (propName: PropertyName): boolean => {
+            const url = (device.getPropertyValue(propName) as string) ?? "";
+            return url === file || path.basename(url) === filename;
+          };
+          if (matchUrl(PropertyName.DevicePictureUrl)) {
             rootMainLogger.debug(
               `onStationImageDownload - Set picture for device ${device.getSerial()} file: ${file} picture_ext: ${picture.type.ext} picture_mime: ${picture.type.mime}`
             );
             device.updateProperty(PropertyName.DevicePicture, picture);
-            break;
+          }
+          if (matchUrl(PropertyName.DeviceDeliveryThumbnailUrl)) {
+            device.updateProperty(PropertyName.DeviceDeliveryThumbnail, picture);
+          }
+          if (matchUrl(PropertyName.DeviceDeliveryCropUrl)) {
+            device.updateProperty(PropertyName.DeviceDeliveryCrop, picture);
           }
         }
       })
@@ -3709,6 +3718,44 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
         picture: r.picture,
       })),
     });
+
+    if (returnCode === DatabaseReturnCode.SUCCESSFUL && station.hasCommand(CommandName.StationDownloadImage)) {
+      // Download delivery thumbnail and crop for any SmartDrop with a pending delivery picture request.
+      const seen = new Set<string>();
+      for (const record of data) {
+        const devSn = record.device_sn;
+        if (!devSn || seen.has(devSn)) continue;
+        const thumbPath = record.history?.thumb_path;
+        const cropEntry = record.picture?.find((p) => !!p.crop_path);
+        const cropPath = cropEntry?.crop_path;
+        if (!thumbPath && !cropPath) continue;
+        this.getDevice(devSn)
+          .then((device) => {
+            if (device instanceof SmartDrop && device.deliveryPicturePending) {
+              device.deliveryPicturePending = false;
+              seen.add(devSn);
+              rootMainLogger.debug("SmartDrop - downloading delivery pictures from database record", {
+                stationSN: station.getSerial(),
+                deviceSN: devSn,
+                thumbPath,
+                cropPath,
+              });
+              if (thumbPath) {
+                // Thumb also updates DevicePicture so the camera entity shows the delivery image.
+                device.updateProperty(PropertyName.DevicePictureUrl, thumbPath);
+                device.updateProperty(PropertyName.DeviceDeliveryThumbnailUrl, thumbPath);
+                station.downloadImage(thumbPath);
+              }
+              if (cropPath) {
+                device.updateProperty(PropertyName.DeviceDeliveryCropUrl, cropPath);
+                station.downloadImage(cropPath);
+              }
+            }
+          })
+          .catch(() => {});
+      }
+    }
+
     this.emit("station database query local", station, returnCode, data);
   }
 

@@ -14,6 +14,8 @@
  * plaintext tail. The encrypted prefix only ever held the quantization tables
  * (=> a small quality/colour shift if we substitute standard q85 tables) and
  * the image dimensions (=> the only thing that must be pinned exactly).
+ * We substitute q95 tables; cameras encode at higher quality than q85, so q95
+ * avoids the 2.5× DC-amplification that causes grey/washed-out output with q85.
  *
  * Wire format:  v2_eufysecurity:<SERIAL>:<10-digit-pkt>:<binary-ciphertext>
  *
@@ -28,15 +30,19 @@ const DC_CHROMA = Buffer.from([0xff, 0xc4, 0x00, 0x1f, 0x01]);
 export const V2_PREFIX = "v2_eufysecurity:";
 
 /**
- * Canonical standard libjpeg header (quality 85, 4:2:0), covering
+ * Canonical standard libjpeg header (quality 95, 4:2:0), covering
  * SOI + APP0 + DQT(luma) + DQT(chroma) + SOF0 + DHT(DC-luma) + DHT(AC-luma).
  * It stops right before its own DC-chroma DHT, because the blob tail supplies
  * the DC-chroma + AC-chroma DHT, the SOS and the scan. Dimensions are a
  * placeholder (0x0101 x 0x0101) and the chroma sampling factor is patched at
  * runtime (see splice offsets below).
+ *
+ * DQT tables use IJG quality 95 (scale=0.1 on q50 base, zigzag order).
+ * q85 (DC luma=5) over-amplifies block averages on cameras that encode at
+ * higher quality, producing grey/washed-out output.
  */
 const PREFIX_TEMPLATE = Buffer.from(
-  "ffd8ffe000104a46494600010100000100010000ffdb0043000503040404030504040405050506070c08070707070f0b0b090c110f1212110f111113161c1713141a1511111821181a1d1d1f1f1f13172224221e241c1e1f1effdb0043010505050706070e08080e1e1411141e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1effc00011080101010103012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa",
+  "ffd8ffe000104a46494600010100000100010000ffdb0043000201010101010201010102020202020403020202020504040304060506060506060607090806070907060608080b08090a0a0a0a0a06080c0c0b0a0c090a0a0affdb004301020202020202050303050a0706070a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0affc00011080101010103012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa",
   "hex"
 );
 // Byte offsets into PREFIX_TEMPLATE that we patch per image.
@@ -162,6 +168,10 @@ export async function decodeV2ImageAuto(data: Buffer): Promise<{
   for (const subsampling of SUBSAMPLINGS) {
     let filled: { jpeg: Buffer; width: number; height: number; img: DecodedImage } | null = null;
     for (const [w, h] of SIZE_LADDER) {
+      // Yield the event loop between iterations so WebSocket ping/pong frames
+      // are processed — without this the 81-iteration JPEG brute-force blocks
+      // the event loop long enough for aiohttp's heartbeat to time out (1006).
+      await new Promise<void>((resolve) => setImmediate(resolve));
       const jpeg = Buffer.concat([buildJpegPrefix(w, h, subsampling), tail]);
       let img: DecodedImage;
       try {
