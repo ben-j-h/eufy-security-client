@@ -83,7 +83,7 @@ import {
   PropertyMetadataObject,
   DeviceConfig,
 } from "./interfaces";
-import { CommandType, ESLAnkerBleConstant, FilterDetectType, FilterEventType, TrackerCommandType } from "../p2p/types";
+import { CommandType, ESLAnkerBleConstant, TrackerCommandType } from "../p2p/types";
 import {
   calculateCellularSignalLevel,
   calculateWifiSignalLevel,
@@ -6360,7 +6360,7 @@ export class SmartDrop extends Camera {
                 break;
             }
             const existingTimeout = this.pictureEventTimeouts.get(this.getSerial());
-            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDatabaseQueryLocal)) {
+            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDatabaseQueryLatestInfo)) {
               // Delivery event with file_path: reset (or set) the delivery picture query timer.
               // Both open and close pushes carry file_path, so the timer always resets to the latest push,
               // ensuring we wait for the recording to finish before querying the database.
@@ -6370,20 +6370,17 @@ export class SmartDrop extends Camera {
               }
               const seconds = getWaitSeconds(this);
               const deviceSn = this.getSerial();
-              const deliveryTime = new Date(message.event_time ?? Date.now());
               this.pictureEventTimeouts.set(
                 deviceSn,
                 setTimeout(() => {
                   rootHTTPLogger.debug("SmartDrop - querying delivery picture from database", { deviceSn, waitSeconds: seconds });
                   this.deliveryPicturePending = true;
-                  // Query history_record_info for this device with no detection-type filter.
-                  // SmartDrop recordings are stored as ALERT events (event_type=2); using FilterEventType.ALL=0
-                  // is interpreted by the HB3 as "type 0 only" and returns nothing.
-                  // Use a 2-day window (yesterday to tomorrow) to avoid timezone edge cases where
-                  // the HB3 local date differs from the container's UTC date.
-                  const startDate = new Date(deliveryTime.getTime() - 24 * 60 * 60 * 1000);
-                  const endDate = new Date(deliveryTime.getTime() + 24 * 60 * 60 * 1000);
-                  station.databaseQueryLocal([deviceSn], startDate, endDate, FilterEventType.ALL, FilterDetectType.NOT_SUPPORT);
+                  // databaseQueryLocal / databaseQueryByDate return nothing for the SmartDrop (it does
+                  // not populate the queryable local history table). Only CMD_DATABASE_QUERY_LATEST_INFO
+                  // returns a record for it — with crop_local_path pointing at the recording's cover
+                  // thumbnail. onStationDatabaseQueryLatest picks it up and, because deliveryPicturePending
+                  // is set, routes it to the delivery-picture properties as well as DevicePicture.
+                  station.databaseQueryLatestInfo();
                   this.pictureEventTimeouts.delete(deviceSn);
                 }, seconds * 1000)
               );

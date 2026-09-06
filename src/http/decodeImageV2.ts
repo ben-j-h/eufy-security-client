@@ -30,35 +30,66 @@ const DC_CHROMA = Buffer.from([0xff, 0xc4, 0x00, 0x1f, 0x01]);
 export const V2_PREFIX = "v2_eufysecurity:";
 
 /**
- * Canonical standard libjpeg header (quality 95, 4:2:0), covering
+ * Canonical standard libjpeg header (IJG quality 85, 4:2:0), covering
  * SOI + APP0 + DQT(luma) + DQT(chroma) + SOF0 + DHT(DC-luma) + DHT(AC-luma).
  * It stops right before its own DC-chroma DHT, because the blob tail supplies
  * the DC-chroma + AC-chroma DHT, the SOS and the scan. Dimensions are a
  * placeholder (0x0101 x 0x0101) and the chroma sampling factor is patched at
  * runtime (see splice offsets below).
  *
- * DQT tables use IJG quality 95 (scale=0.1 on q50 base, zigzag order).
- * q85 (DC luma=5) over-amplifies block averages on cameras that encode at
- * higher quality, producing grey/washed-out output.
+ * The two DQT tables here are only a *substitute* — the real per-encoder tables
+ * were in the encrypted head we can't recover. For encoders that compress
+ * harder than q85 the substitute collapses contrast to a grey band (the
+ * washed-out HomeBase-2 event image); callers that know the real tables should
+ * pass them to {@link buildJpegPrefix} via the `dqt` argument (see
+ * {@link V2EncoderProfile}).
+ *
+ * NOTE: an earlier revision of this file shipped a "q95" template whose chroma
+ * DQT carried 14 stray 0x0a bytes past its declared length, making every
+ * spliced JPEG unparseable. Keep this template byte-exact (each DQT payload is
+ * exactly 64 bytes; total length 393).
  */
 const PREFIX_TEMPLATE = Buffer.from(
-  "ffd8ffe000104a46494600010100000100010000ffdb0043000201010101010201010102020202020403020202020504040304060506060506060607090806070907060608080b08090a0a0a0a0a06080c0c0b0a0c090a0a0affdb004301020202020202050303050a0706070a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0affc00011080101010103012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa",
+  "ffd8ffe000104a46494600010100000100010000ffdb0043000503040404030504040405050506070c08070707070f0b0b090c110f1212110f111113161c1713141a1511111821181a1d1d1f1f1f13172224221e241c1e1f1effdb0043010505050706070e08080e1e1411141e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1effc00011080101010103012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa",
   "hex"
 );
 // Byte offsets into PREFIX_TEMPLATE that we patch per image.
 const OFF_HEIGHT = 163; // SOF0 height, big-endian uint16
 const OFF_WIDTH = 165; //  SOF0 width,  big-endian uint16
 const OFF_Y_SAMPLING = 169; // luma component sampling factor (0x22=4:2:0, 0x21=4:2:2, 0x11=4:4:4)
+const OFF_DQT_LUMA = 25; //  first byte of the 64-byte luma DQT table payload
+const OFF_DQT_CHROMA = 94; // first byte of the 64-byte chroma DQT table payload
+const DQT_TABLE_LEN = 64;
 
 export type ChromaSubsampling = "4:2:0" | "4:2:2" | "4:4:4";
 const Y_SAMPLING: Record<ChromaSubsampling, number> = { "4:2:0": 0x22, "4:2:2": 0x21, "4:4:4": 0x11 };
 
-/** Build the standard JPEG header for a given geometry by patching the template. */
-export function buildJpegPrefix(width: number, height: number, subsampling: ChromaSubsampling = "4:2:0"): Buffer {
+/** A pair of 64-byte JPEG quantization tables (luma, chroma) in zig-zag order —
+ *  the real per-encoder tables, recovered e.g. from a decryptable v1 image. */
+export interface DqtTables {
+  luma: Buffer;
+  chroma: Buffer;
+}
+
+/**
+ * Build the standard JPEG header for a given geometry by patching the template.
+ * `dqt`, when supplied, replaces the substitute q85 quantization tables with the
+ * encoder's real ones (each must be exactly 64 bytes, zig-zag order).
+ */
+export function buildJpegPrefix(
+  width: number,
+  height: number,
+  subsampling: ChromaSubsampling = "4:2:0",
+  dqt?: DqtTables
+): Buffer {
   const p = Buffer.from(PREFIX_TEMPLATE); // copy
   p.writeUInt16BE(height & 0xffff, OFF_HEIGHT);
   p.writeUInt16BE(width & 0xffff, OFF_WIDTH);
   p[OFF_Y_SAMPLING] = Y_SAMPLING[subsampling];
+  if (dqt) {
+    if (dqt.luma.length === DQT_TABLE_LEN) dqt.luma.copy(p, OFF_DQT_LUMA);
+    if (dqt.chroma.length === DQT_TABLE_LEN) dqt.chroma.copy(p, OFF_DQT_CHROMA);
+  }
   return p;
 }
 
@@ -85,13 +116,76 @@ export function spliceV2Image(
   data: Buffer,
   width: number,
   height: number,
-  subsampling: ChromaSubsampling = "4:2:0"
+  subsampling: ChromaSubsampling = "4:2:0",
+  dqt?: DqtTables
 ): Buffer | null {
   const ct = v2Ciphertext(data) ?? (data.indexOf(DC_CHROMA) >= 0 ? data : null);
   if (!ct) return null;
   const cut = ct.indexOf(DC_CHROMA);
   if (cut < 0) return null;
-  return Buffer.concat([buildJpegPrefix(width, height, subsampling), ct.subarray(cut)]);
+  return Buffer.concat([buildJpegPrefix(width, height, subsampling, dqt), ct.subarray(cut)]);
+}
+
+/** The station serial embedded in a `v2_eufysecurity:<STATION_SN>:<pkt>:<binary>`
+ *  blob, or null if `data` is not a v2 blob. */
+export function v2StationSerial(data: Buffer): string | null {
+  if (data.length < V2_PREFIX.length || data.subarray(0, V2_PREFIX.length).toString("latin1") !== V2_PREFIX) {
+    return null;
+  }
+  const end = data.indexOf(0x3a, V2_PREFIX.length);
+  return end > V2_PREFIX.length ? data.subarray(V2_PREFIX.length, end).toString("latin1") : null;
+}
+
+/**
+ * A per-encoder decode profile: the real dimensions, chroma subsampling and
+ * quantization tables that were hidden in the encrypted head. Recovered once
+ * (e.g. by decrypting a legacy v1 `eufysecurity:` image from the same camera)
+ * and then reused for every v2 blob from that station, since they are static
+ * per firmware/encoder.
+ */
+export interface V2EncoderProfile extends DqtTables {
+  width: number;
+  height: number;
+  subsampling: ChromaSubsampling;
+}
+
+/**
+ * Known v2 encoder profiles, keyed by station serial (exact match).
+ *
+ * `T8010P1321293BBD` — HomeBase 2 paired with a T8790 SmartDrop. It switched
+ * its `pic_url` / `CMD_DATABASE_IMAGE` payloads from plaintext JPEG to
+ * `v2_eufysecurity:` around 2026-05. Tables + geometry recovered by decrypting
+ * an April 2026 v1 image from the same station (SOF0 800x600 4:2:0, standard
+ * Huffman tables, non-standard DQT).
+ */
+export const V2_ENCODER_PROFILES: Record<string, V2EncoderProfile> = {
+  T8010P1321293BBD: {
+    width: 800,
+    height: 600,
+    subsampling: "4:2:0",
+    luma: Buffer.from(
+      "2016181c1814201c1a1c24222026305034302c2c3062464a3a5074667a787266706e8090b89c8088ae8a6e70a0daa2aebec4ced0ce7c9ae2f2e0c8f0b8cacec6",
+      "hex"
+    ),
+    chroma: Buffer.from(
+      "222424302a305e34345ec6847084c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+      "hex"
+    ),
+  },
+};
+
+/** Look up a known encoder profile for a station serial, or undefined. */
+export function getV2EncoderProfile(stationSerial: string | null | undefined): V2EncoderProfile | undefined {
+  return stationSerial ? V2_ENCODER_PROFILES[stationSerial] : undefined;
+}
+
+/**
+ * Reconstruct a viewable JPEG from a v2 blob using a known encoder profile —
+ * exact geometry and the encoder's real quantization tables, no jpeg-js and no
+ * brute force. Returns null if `data` is not a v2 blob with a plaintext tail.
+ */
+export function spliceV2ImageForProfile(data: Buffer, profile: V2EncoderProfile): Buffer | null {
+  return spliceV2Image(data, profile.width, profile.height, profile.subsampling, profile);
 }
 
 /** 16:9 then 4:3 size ladder, small→large, used for geometry auto-detection. */
@@ -135,10 +229,17 @@ const SUBSAMPLINGS: ChromaSubsampling[] = ["4:2:0", "4:4:4", "4:2:2"];
  * The fastest production path is to pass the dimensions from event metadata to
  * {@link spliceV2Image} directly and skip this brute-force entirely.
  *
+ * `dqt`, when supplied (from a known {@link V2EncoderProfile}), replaces the
+ * substitute q85 quantization tables with the encoder's real ones — this fixes
+ * washed-out / grey-band output while still auto-detecting the geometry.
+ *
  * @returns the reconstructed JPEG + detected geometry, or null if undetectable
  *          / `jpeg-js` is not installed.
  */
-export async function decodeV2ImageAuto(data: Buffer): Promise<{
+export async function decodeV2ImageAuto(
+  data: Buffer,
+  dqt?: DqtTables
+): Promise<{
   jpeg: Buffer;
   width: number;
   height: number;
@@ -172,7 +273,7 @@ export async function decodeV2ImageAuto(data: Buffer): Promise<{
       // are processed — without this the 81-iteration JPEG brute-force blocks
       // the event loop long enough for aiohttp's heartbeat to time out (1006).
       await new Promise<void>((resolve) => setImmediate(resolve));
-      const jpeg = Buffer.concat([buildJpegPrefix(w, h, subsampling), tail]);
+      const jpeg = Buffer.concat([buildJpegPrefix(w, h, subsampling, dqt), tail]);
       let img: DecodedImage;
       try {
         img = jpegDecode(jpeg, { maxResolutionInMP: 100, maxMemoryUsageInMB: 512, tolerantDecoding: true });
@@ -219,7 +320,7 @@ export async function decodeV2ImageAuto(data: Buffer): Promise<{
     const [mcw, mch] = MCU_SIZE[ss];
     const decodeAt = (w: number, h: number) => {
       try {
-        return jpegDecode(Buffer.concat([buildJpegPrefix(w, h, ss), tail]), {
+        return jpegDecode(Buffer.concat([buildJpegPrefix(w, h, ss, dqt), tail]), {
           maxResolutionInMP: 400,
           maxMemoryUsageInMB: 1024,
           tolerantDecoding: true,
@@ -286,7 +387,7 @@ export async function decodeV2ImageAuto(data: Buffer): Promise<{
 
     if (width !== best.width || height !== best.height) {
       best = {
-        jpeg: Buffer.concat([buildJpegPrefix(width, height, ss), tail]),
+        jpeg: Buffer.concat([buildJpegPrefix(width, height, ss, dqt), tail]),
         width,
         height,
         subsampling: ss,

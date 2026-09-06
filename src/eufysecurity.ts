@@ -3658,7 +3658,7 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     returnCode: DatabaseReturnCode,
     data: Array<DatabaseQueryLatestInfo>
   ): void {
-    rootMainLogger.debug("SMARTDROP DB DUMP - databaseQueryLatestInfo result", {
+    rootMainLogger.debug("Station database query latest info result", {
       stationSN: station.getSerial(),
       returnCode: returnCode,
       recordCount: data.length,
@@ -3682,6 +3682,21 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
               }
               device.update(raw);
               if (localCropPath && station.hasCommand(CommandName.StationDownloadImage)) {
+                if (device instanceof SmartDrop && device.deliveryPicturePending) {
+                  // A SmartDrop delivery event asked for this query (see SmartDrop.processPushNotification).
+                  // The latest-info record's crop is the recording's cover thumbnail — route it to the
+                  // delivery-picture properties as well as DevicePicture, so the delivery image entities
+                  // and the camera entity both update. _emitStationImageDownload matches on these URLs.
+                  device.deliveryPicturePending = false;
+                  rootMainLogger.debug("SmartDrop - downloading delivery picture from latest-info record", {
+                    stationSN: station.getSerial(),
+                    deviceSN: device.getSerial(),
+                    localCropPath,
+                  });
+                  device.updateProperty(PropertyName.DevicePictureUrl, localCropPath);
+                  device.updateProperty(PropertyName.DeviceDeliveryThumbnailUrl, localCropPath);
+                  device.updateProperty(PropertyName.DeviceDeliveryCropUrl, localCropPath);
+                }
                 station.downloadImage(localCropPath);
               }
             })
@@ -3706,56 +3721,9 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
     returnCode: DatabaseReturnCode,
     data: Array<DatabaseQueryLocal>
   ): void {
-    rootMainLogger.debug("SMARTDROP DB DUMP - databaseQueryLocal result", {
-      stationSN: station.getSerial(),
-      returnCode: returnCode,
-      recordCount: data.length,
-      records: data.map((r) => ({
-        record_id: r.record_id,
-        station_sn: r.station_sn,
-        device_sn: r.device_sn,
-        history: r.history,
-        picture: r.picture,
-      })),
-    });
-
-    if (returnCode === DatabaseReturnCode.SUCCESSFUL && station.hasCommand(CommandName.StationDownloadImage)) {
-      // Download delivery thumbnail and crop for any SmartDrop with a pending delivery picture request.
-      const seen = new Set<string>();
-      for (const record of data) {
-        const devSn = record.device_sn;
-        if (!devSn || seen.has(devSn)) continue;
-        const thumbPath = record.history?.thumb_path;
-        const cropEntry = record.picture?.find((p) => !!p.crop_path);
-        const cropPath = cropEntry?.crop_path;
-        if (!thumbPath && !cropPath) continue;
-        this.getDevice(devSn)
-          .then((device) => {
-            if (device instanceof SmartDrop && device.deliveryPicturePending) {
-              device.deliveryPicturePending = false;
-              seen.add(devSn);
-              rootMainLogger.debug("SmartDrop - downloading delivery pictures from database record", {
-                stationSN: station.getSerial(),
-                deviceSN: devSn,
-                thumbPath,
-                cropPath,
-              });
-              if (thumbPath) {
-                // Thumb also updates DevicePicture so the camera entity shows the delivery image.
-                device.updateProperty(PropertyName.DevicePictureUrl, thumbPath);
-                device.updateProperty(PropertyName.DeviceDeliveryThumbnailUrl, thumbPath);
-                station.downloadImage(thumbPath);
-              }
-              if (cropPath) {
-                device.updateProperty(PropertyName.DeviceDeliveryCropUrl, cropPath);
-                station.downloadImage(cropPath);
-              }
-            }
-          })
-          .catch(() => {});
-      }
-    }
-
+    // NOTE: the SmartDrop does not populate the queryable local history table, so
+    // databaseQueryLocal returns no records for it. Its delivery pictures are
+    // fetched via databaseQueryLatestInfo instead (see onStationDatabaseQueryLatest).
     this.emit("station database query local", station, returnCode, data);
   }
 

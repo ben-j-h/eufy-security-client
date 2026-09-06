@@ -30,7 +30,14 @@ import {
   EufyCamC35DetectionTypes,
 } from "./types";
 import { HTTPApi } from "./api";
-import { spliceV2Image, V2_PREFIX, decodeV2ImageAuto } from "./decodeImageV2";
+import {
+  spliceV2Image,
+  spliceV2ImageForProfile,
+  V2_PREFIX,
+  decodeV2ImageAuto,
+  getV2EncoderProfile,
+  v2StationSerial,
+} from "./decodeImageV2";
 import { ensureError } from "../error";
 import { ImageBaseCodeError } from "./error";
 import { LockPushEvent } from "./../push/types";
@@ -703,22 +710,20 @@ export const getImageKey = function (serialNumber: string, p2pDid: string, code:
 
 export const decodeImage = function (p2pDid: string, data: Buffer): Buffer {
   if (data.length >= 12) {
-    // v6 "v2_eufysecurity:" thumbnails: head-only obfuscation, decodable WITHOUT
-    // any key (see decodeImageV2.ts). The encrypted JPEG header only hid the
-    // quantization tables + dimensions; the scan data is plaintext standard JPEG.
+    // "v2_eufysecurity:" thumbnails: head-only AES-GCM obfuscation, decodable
+    // WITHOUT the key (see decodeImageV2.ts). The encrypted ~286-byte prefix only
+    // hid the quantization tables + dimensions; everything from the DC-chroma DHT
+    // marker onward is plaintext standard baseline JPEG, so we splice a fresh
+    // header onto that tail.
     //
-    // NOTE / LIMITATION: this synchronous path reconstructs with a FIXED geometry of
-    // 288x176 4:2:0 — the standard event-thumbnail size, which covers the common
-    // push-notification image. Images of OTHER sizes (e.g. 552x408, 1272x728, 4:4:4
-    // snapshots) will be SHEARED here, because the true dimensions can only be
-    // recovered by trial decoding, which is async and not possible in this sync API.
-    //
-    // TODO: cover all sizes — add an async decode path (decodeV2ImageAuto() in
-    // decodeImageV2.ts already does width/height/subsampling auto-detection via the
-    // optional jpeg-js dep) and have the callers in api.ts (getImage) and
-    // p2p/session.ts await it, OR pass the real dimensions in from event metadata.
+    // This synchronous path can't run the jpeg-js geometry auto-detect, so it
+    // relies on a known per-encoder profile (exact dimensions + real DQT tables)
+    // when the station has one, and otherwise falls back to the common
+    // 288x176 4:2:0 event-thumbnail geometry (other sizes shear here — callers
+    // that can await should use decodeImageAsync).
     if (data.subarray(0, V2_PREFIX.length).toString("latin1") === V2_PREFIX) {
-      const spliced = spliceV2Image(data, 288, 176, "4:2:0");
+      const profile = getV2EncoderProfile(v2StationSerial(data));
+      const spliced = profile ? spliceV2ImageForProfile(data, profile) : spliceV2Image(data, 288, 176, "4:2:0");
       return spliced ?? data;
     }
     const header = data.subarray(0, 12).toString();
@@ -739,72 +744,25 @@ export const decodeImage = function (p2pDid: string, data: Buffer): Buffer {
 };
 
 /**
- * Try AES-128-ECB decryption of a v2_eufysecurity image using the same key
- * derivation as the older `eufysecurity` format. If the derived key is correct
- * the decrypted buffer is the complete original JPEG (real DQT tables + real
- * dimensions) — no geometry brute-force needed and no quality substitution.
- */
-const decodeV2ImageWithKey = function (data: Buffer, p2pDid: string): Buffer | null {
-  // Parse v2_eufysecurity:<SERIAL>:<PKT>:<binary>
-  // V2_PREFIX already includes the trailing ':', so serial starts at V2_PREFIX.length.
-  // Scan from there to find the two colons that delimit SERIAL and PKT.
-  const serialStart = V2_PREFIX.length;
-  let colonCount = 0;
-  let binaryOffset = -1;
-  let pktStart = -1;
-  let pktEnd = -1;
-  let serialEnd = -1;
-  for (let i = serialStart; i < data.length; i++) {
-    if (data[i] !== 0x3a) continue;
-    colonCount++;
-    if (colonCount === 1) { serialEnd = i; pktStart = i + 1; }
-    else if (colonCount === 2) { pktEnd = i; binaryOffset = i + 1; break; }
-  }
-  if (binaryOffset < 0 || serialEnd <= serialStart || pktEnd <= pktStart) return null;
-  const serial = data.subarray(serialStart, serialEnd).toString("latin1");
-  const pkt = data.subarray(pktStart, pktEnd).toString("latin1");
-  const binary = data.subarray(binaryOffset);
-  if (binary.length < 256) return null;
-  rootHTTPLogger.debug("decodeV2ImageWithKey - attempt", {
-    serial,
-    pkt,
-    p2pDid,
-    binaryLength: binary.length,
-    binaryHead: binary.subarray(0, 32).toString("hex"),
-  });
-  try {
-    const imageKey = getImageKey(serial, p2pDid, pkt);
-    const decipher = createDecipheriv("aes-128-ecb", Buffer.from(imageKey, "utf-8").subarray(0, 16), null);
-    decipher.setAutoPadding(false);
-    const decrypted = Buffer.concat([decipher.update(binary.subarray(0, 256)), decipher.final()]);
-    rootHTTPLogger.debug("decodeV2ImageWithKey - decrypted head", {
-      head: decrypted.subarray(0, 20).toString("hex"),
-      isJpeg: decrypted[0] === 0xff && decrypted[1] === 0xd8,
-    });
-    if (decrypted[0] !== 0xff || decrypted[1] !== 0xd8) return null; // not a JPEG SOI — wrong key
-    const full = Buffer.from(binary);
-    decrypted.copy(full);
-    rootHTTPLogger.info("decodeV2ImageWithKey - key-based JPEG decryption succeeded", { serial, pkt });
-    return full;
-  } catch (err) {
-    rootHTTPLogger.debug("decodeV2ImageWithKey - decryption failed", { err: String(err) });
-    return null;
-  }
-};
-
-/**
- * Async variant of decodeImage that handles v2_eufysecurity: images at their
- * actual resolution. Tries key-based AES-128-ECB decryption first (returns the
- * original JPEG with real quantization tables); falls back to geometry
- * brute-force via decodeV2ImageAuto if the key derivation doesn't match.
+ * Async variant of decodeImage that reconstructs v2_eufysecurity: images at
+ * their true resolution.
+ *
+ * When the station has a known encoder profile (see V2_ENCODER_PROFILES) its
+ * real quantization tables are fed into the jpeg-js geometry auto-detect — that
+ * both fixes the washed-out / grey-band output and pins the geometry. Without a
+ * profile it does the plain geometry brute-force with substitute q85 tables.
+ * If jpeg-js is unavailable it falls back to the profile's exact geometry, then
+ * to the synchronous 288x176 splice.
  */
 export const decodeImageAsync = async function (p2pDid: string, data: Buffer): Promise<Buffer> {
   if (data.length >= V2_PREFIX.length && data.subarray(0, V2_PREFIX.length).toString("latin1") === V2_PREFIX) {
-    const keyed = decodeV2ImageWithKey(data, p2pDid);
-    if (keyed) return keyed;
-    const result = await decodeV2ImageAuto(data);
-    if (result && !result.lowConfidence) return result.jpeg;
+    const profile = getV2EncoderProfile(v2StationSerial(data));
+    const result = await decodeV2ImageAuto(data, profile);
     if (result) return result.jpeg;
+    if (profile) {
+      const spliced = spliceV2ImageForProfile(data, profile);
+      if (spliced) return spliced;
+    }
   }
   return decodeImage(p2pDid, data);
 };
