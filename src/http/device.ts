@@ -6196,7 +6196,13 @@ export class DoorbellLock extends DoorbellCamera {
   }
 }
 export class SmartDrop extends Camera {
+  /** Set while a delivery-picture download/query is in flight; cleared once a picture arrives
+   *  (see EufySecurity._emitStationImageDownload) so the databaseQueryLatestInfo fallback
+   *  doesn't overwrite a good frame with the station's lagging cover crop. */
   public deliveryPicturePending = false;
+  /** The recording name (`h264_YYYYMMDDHHMMSS`) from the most recent push that carried one,
+   *  used to derive the crop-thumbnail path for the delivery picture. */
+  private deliveryPictureFilePath?: string;
 
   static async getInstance(api: HTTPApi, device: DeviceListResponse, deviceConfig: DeviceConfig): Promise<SmartDrop> {
     return new SmartDrop(api, device, deviceConfig);
@@ -6228,10 +6234,16 @@ export class SmartDrop extends Camera {
                   case SmartDropOpenedBy.PIN:
                     // Open with PIN
                     if (message.pin === "0") {
-                      // Master PIN or press open (indistinguishable in push) — either way, owner is retrieving/checking
+                      // Master PIN or press open (indistinguishable in push) — either way, owner is
+                      // retrieving/checking, so the box is now empty. Reset the delivery count: the
+                      // box only sends cmd 6246 when the count *changes*, so a retrieval that doesn't
+                      // trigger one would otherwise leave DeviceDeliveries stuck at its old value.
+                      // Setting it via the cmd-6246 raw key cascades to packageDelivered=false and
+                      // timesOpened=0 (see handlePropertyChange).
                       this.updateProperty(PropertyName.DeviceOpenedByType, 2);
                       this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
                       this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
+                      this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", "push");
                       this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
                     } else {
                       // Delivery/access PIN — use person_name (carrier ID, e.g. "USPS"); message.name is the device label, not carrier
@@ -6360,10 +6372,11 @@ export class SmartDrop extends Camera {
                 break;
             }
             const existingTimeout = this.pictureEventTimeouts.get(this.getSerial());
-            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDatabaseQueryLatestInfo)) {
-              // Delivery event with file_path: reset (or set) the delivery picture query timer.
-              // Both open and close pushes carry file_path, so the timer always resets to the latest push,
-              // ensuring we wait for the recording to finish before querying the database.
+            if (!isEmpty(message.file_path) && station.hasCommand(CommandName.StationDownloadImage)) {
+              // Delivery event with file_path: reset (or set) the delivery picture timer.
+              // Both open and close pushes carry file_path, so the timer always resets to the latest
+              // push, ensuring we wait for the recording to finish and its crop to be written.
+              this.deliveryPictureFilePath = message.file_path;
               if (existingTimeout !== undefined) {
                 clearTimeout(existingTimeout);
                 this.pictureEventTimeouts.delete(this.getSerial());
@@ -6373,15 +6386,29 @@ export class SmartDrop extends Camera {
               this.pictureEventTimeouts.set(
                 deviceSn,
                 setTimeout(() => {
-                  rootHTTPLogger.debug("SmartDrop - querying delivery picture from database", { deviceSn, waitSeconds: seconds });
-                  this.deliveryPicturePending = true;
-                  // databaseQueryLocal / databaseQueryByDate return nothing for the SmartDrop (it does
-                  // not populate the queryable local history table). Only CMD_DATABASE_QUERY_LATEST_INFO
-                  // returns a record for it — with crop_local_path pointing at the recording's cover
-                  // thumbnail. onStationDatabaseQueryLatest picks it up and, because deliveryPicturePending
-                  // is set, routes it to the delivery-picture properties as well as DevicePicture.
-                  station.databaseQueryLatestInfo();
                   this.pictureEventTimeouts.delete(deviceSn);
+                  this.deliveryPicturePending = true;
+                  const filePath = this.deliveryPictureFilePath;
+                  if (!isEmpty(filePath)) {
+                    // The crop thumbnail sits next to the recording: h264_YYYYMMDDHHMMSS ->
+                    // /media/mmcblk0p1/video/YYYYMMDDHHMMSS_c00.jpg . Download it directly — it is
+                    // the actual delivery frame, unlike databaseQueryLatestInfo's cover crop which
+                    // lags the recording by minutes on the HomeBase 2.
+                    const cropPath = `/media/mmcblk0p1/video/${filePath!.replace(/^h264_/, "")}_c00.jpg`;
+                    rootHTTPLogger.debug("SmartDrop - downloading delivery picture", { deviceSn, cropPath, waitSeconds: seconds });
+                    this.updateProperty(PropertyName.DevicePictureUrl, cropPath);
+                    this.updateProperty(PropertyName.DeviceDeliveryThumbnailUrl, cropPath);
+                    this.updateProperty(PropertyName.DeviceDeliveryCropUrl, cropPath);
+                    station.downloadImage(cropPath);
+                  }
+                  // Fallback: if the derived crop wasn't written yet (deliveryPicturePending still
+                  // set ~20s later), ask the station for its latest cover crop instead.
+                  setTimeout(() => {
+                    if (this.deliveryPicturePending && station.hasCommand(CommandName.StationDatabaseQueryLatestInfo)) {
+                      rootHTTPLogger.debug("SmartDrop - derived crop unavailable, falling back to databaseQueryLatestInfo", { deviceSn });
+                      station.databaseQueryLatestInfo();
+                    }
+                  }, 20 * 1000);
                 }, seconds * 1000)
               );
             } else if (existingTimeout === undefined) {
@@ -6491,16 +6518,19 @@ export class SmartDrop extends Camera {
         this.updateProperty(PropertyName.DevicePackageDelivered, true);
       } else if (openType === 2) {
         if (userIndex === 0) {
-          // Master PIN
+          // Master PIN — owner retrieving/checking, box now empty. Reset the delivery count
+          // (cascades to packageDelivered=false, timesOpened=0); see the push handler.
           this.updateProperty(PropertyName.DeviceOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
+          this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", "p2p");
           this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
         } else if (userIndex === undefined) {
           // Press open (no PIN, no userIndex) — box assumed empty
           this.updateProperty(PropertyName.DeviceOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
           this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
+          this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", "p2p");
           this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
         } else {
           // Delivery/access code (non-zero userIndex) — defer delivery state to cmd 6246

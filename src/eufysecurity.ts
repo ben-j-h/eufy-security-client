@@ -3607,6 +3607,11 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
           }
           if (matchUrl(PropertyName.DeviceDeliveryThumbnailUrl)) {
             device.updateProperty(PropertyName.DeviceDeliveryThumbnail, picture);
+            if (device instanceof SmartDrop) {
+              // A delivery picture arrived — stop the databaseQueryLatestInfo fallback from
+              // overwriting it with the station's lagging cover crop.
+              device.deliveryPicturePending = false;
+            }
           }
           if (matchUrl(PropertyName.DeviceDeliveryCropUrl)) {
             device.updateProperty(PropertyName.DeviceDeliveryCrop, picture);
@@ -3683,10 +3688,12 @@ export class EufySecurity extends TypedEmitter<EufySecurityEvents> {
               device.update(raw);
               if (localCropPath && station.hasCommand(CommandName.StationDownloadImage)) {
                 if (device instanceof SmartDrop && device.deliveryPicturePending) {
-                  // A SmartDrop delivery event asked for this query (see SmartDrop.processPushNotification).
-                  // The latest-info record's crop is the recording's cover thumbnail — route it to the
-                  // delivery-picture properties as well as DevicePicture, so the delivery image entities
-                  // and the camera entity both update. _emitStationImageDownload matches on these URLs.
+                  // Fallback path: a SmartDrop delivery is pending but the crop derived from the push
+                  // file_path wasn't available (see SmartDrop.processPushNotification). Use this
+                  // latest-info cover crop instead — it may lag the recording, but it beats nothing.
+                  // Route it to the delivery-picture properties as well as DevicePicture so the
+                  // delivery image entities and the camera entity update. Matched on URL by
+                  // _emitStationImageDownload.
                   device.deliveryPicturePending = false;
                   rootMainLogger.debug("SmartDrop - downloading delivery picture from latest-info record", {
                     stationSN: station.getSerial(),
