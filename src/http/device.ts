@@ -82,6 +82,7 @@ import {
   Voices,
   PropertyMetadataObject,
   DeviceConfig,
+  SmartDropOpenedDetails,
 } from "./interfaces";
 import { CommandType, ESLAnkerBleConstant, TrackerCommandType } from "../p2p/types";
 import {
@@ -6195,6 +6196,13 @@ export class DoorbellLock extends DoorbellCamera {
     }
   }
 }
+interface SmartDropPendingOpen {
+  startedAt: number;
+  timeout: ReturnType<typeof setTimeout>;
+  p2p?: { openType: number; userIndex?: number };
+  push?: { openType?: number; pin?: string; personName?: string };
+}
+
 export class SmartDrop extends Camera {
   /** Set while a delivery-picture download/query is in flight; cleared once a picture arrives
    *  (see EufySecurity._emitStationImageDownload) so the databaseQueryLatestInfo fallback
@@ -6203,6 +6211,16 @@ export class SmartDrop extends Camera {
   /** The recording name (`h264_YYYYMMDDHHMMSS`) from the most recent push that carried one,
    *  used to derive the crop-thumbnail path for the delivery picture. */
   private deliveryPictureFilePath?: string;
+
+  /** How long to wait for the second half (P2P or push) of an open before resolving it alone. */
+  static readonly OPEN_RESOLVE_TIMEOUT_MS = 2500;
+  /** A missing half arriving this long after a timed-out resolution is merged, not counted again. */
+  static readonly OPEN_LATE_SIGNAL_MS = 30 * 1000;
+  static readonly DELIVERY_PICTURE_PROBE_SECONDS = [8, 30];
+
+  private pendingOpen?: SmartDropPendingOpen;
+  private lastResolvedOpen?: Pick<SmartDropPendingOpen, "p2p" | "push"> & { resolvedAt: number; type: number; name: string };
+  private eventDurationSeconds = 10;
 
   static async getInstance(api: HTTPApi, device: DeviceListResponse, deviceConfig: DeviceConfig): Promise<SmartDrop> {
     return new SmartDrop(api, device, deviceConfig);
@@ -6221,112 +6239,23 @@ export class SmartDrop extends Camera {
           if (message.event_type === CusPushEvent.SMART_DROP) {
             switch (message.open) {
               case SmartDropOpen.OPEN:
-                // Open
-                this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "1", "push");
-                this.updateProperty(PropertyName.DeviceTimesOpened, ((this.getPropertyValue(PropertyName.DeviceTimesOpened) as number) || 0) + 1);
-                switch (message.openType) {
-                  case SmartDropOpenedBy.APP:
-                    // Open remotely via App
-                    this.updateProperty(PropertyName.DeviceOpenedByType, 1);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 1);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-                    break;
-                  case SmartDropOpenedBy.PIN:
-                    // Open with PIN
-                    if (message.pin === "0") {
-                      // Master PIN or press open (indistinguishable in push) — either way, owner is
-                      // retrieving/checking, so the box is now empty. Reset the delivery count: the
-                      // box only sends cmd 6246 when the count *changes*, so a retrieval that doesn't
-                      // trigger one would otherwise leave DeviceDeliveries stuck at its old value.
-                      // Setting it via the cmd-6246 raw key cascades to packageDelivered=false and
-                      // timesOpened=0 (see handlePropertyChange).
-                      this.updateProperty(PropertyName.DeviceOpenedByType, 2);
-                      this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
-                      this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-                      this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", "push");
-                      this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
-                    } else {
-                      // Delivery/access PIN — use person_name (carrier ID, e.g. "USPS"); message.name is the device label, not carrier
-                      const pinName = message.person_name ?? (message.pin ?? "");
-                      this.updateProperty(PropertyName.DeviceOpenedByType, 3);
-                      this.updateProperty(PropertyName.DeviceOpenedByName, pinName);
-                      this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
-                      this.updateProperty(PropertyName.DeviceLastOpenedByName, pinName);
-                      if (!isEmpty(message.person_name)) {
-                        // Carrier used their delivery PIN — package was delivered
-                        this.updateProperty(PropertyName.DevicePackageDelivered, true);
-                        this.updateProperty(PropertyName.DevicePersonName, pinName);
-                        this.updateProperty(PropertyName.DevicePersonDetected, true);
-                        this.clearEventTimeout(DeviceEvent.PersonDetected);
-                        this.eventTimeouts.set(
-                          DeviceEvent.PersonDetected,
-                          setTimeout(async () => {
-                            this.updateProperty(PropertyName.DevicePersonName, "");
-                            this.updateProperty(PropertyName.DevicePersonDetected, false);
-                            this.eventTimeouts.delete(DeviceEvent.PersonDetected);
-                          }, eventDurationSeconds * 1000)
-                        );
-                      }
-                    }
-                    break;
-                  case SmartDropOpenedBy.CARRIER: {
-                    // Carrier delivery — use person_name (carrier ID, e.g. "USPS"); message.name is the device label, not carrier
-                    const carrierName = message.person_name ?? "";
-                    this.updateProperty(PropertyName.DeviceOpenedByType, 4);
-                    this.updateProperty(PropertyName.DeviceOpenedByName, carrierName);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByName, carrierName);
-                    this.updateProperty(PropertyName.DevicePackageDelivered, true);
-                    if (!isEmpty(carrierName)) {
-                      this.updateProperty(PropertyName.DevicePersonName, carrierName);
-                      this.updateProperty(PropertyName.DevicePersonDetected, true);
-                      this.clearEventTimeout(DeviceEvent.PersonDetected);
-                      this.eventTimeouts.set(
-                        DeviceEvent.PersonDetected,
-                        setTimeout(async () => {
-                          this.updateProperty(PropertyName.DevicePersonName, "");
-                          this.updateProperty(PropertyName.DevicePersonDetected, false);
-                          this.eventTimeouts.delete(DeviceEvent.PersonDetected);
-                        }, eventDurationSeconds * 1000)
-                      );
-                    }
-                    break;
-                  }
-                  case SmartDropOpenedBy.EMERGENCY_RELEASE_BUTTON:
-                    // Opened via emergency release button
-                    this.updateProperty(PropertyName.DeviceOpenedByType, 5);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 5);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-                    break;
-                  case SmartDropOpenedBy.KEY:
-                    // Opened with key
-                    this.updateProperty(PropertyName.DeviceOpenedByType, 6);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByType, 6);
-                    this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-                    break;
-                  default:
-                    rootHTTPLogger.debug(
-                      "SmartDrop process push notification - Unhandled SmartDrop push event (openType)",
-                      message
-                    );
-                    break;
-                }
+                // Open — merged with the P2P cmd 2108 for the same open and resolved once (see addOpenSignal)
+                this.eventDurationSeconds = eventDurationSeconds;
+                this.addOpenSignal(
+                  { push: { openType: message.openType, pin: message.pin, personName: message.person_name } },
+                  "push"
+                );
                 break;
               case SmartDropOpen.CLOSED:
                 // Closed
-                this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "0", "push");
+                this.closeEvent("push");
                 break;
               case SmartDropOpen.LID_STUCK:
-                // The lid may be stuck
-                this.updateProperty(PropertyName.DeviceLidStuckAlert, true);
+                // "The lid may be stuck" — in practice sent ~75s after any open that hasn't closed yet
+                // (seen both for a lid jammed ajar and for a carrier leaving it open). Latched until the
+                // box reports closed, so it reads as "still open after ~1 min".
                 this.clearEventTimeout(DeviceEvent.LidStuckAlert);
-                this.eventTimeouts.set(
-                  DeviceEvent.LidStuckAlert,
-                  setTimeout(async () => {
-                    this.updateProperty(PropertyName.DeviceLidStuckAlert, false);
-                    this.eventTimeouts.delete(DeviceEvent.LidStuckAlert);
-                  }, eventDurationSeconds * 1000)
-                );
+                this.updateProperty(PropertyName.DeviceLidStuckAlert, true);
                 break;
               case SmartDropOpen.PIN_INCORRECT:
                 // Someone had entered incorrect PIN
@@ -6341,16 +6270,9 @@ export class SmartDrop extends Camera {
                 );
                 break;
               case SmartDropOpen.LEFT_OPENED:
-                // Has been left opened for 1 minute
-                this.updateProperty(PropertyName.DeviceLongTimeNotCloseAlert, true);
+                // Has been left opened for 1 minute — latched until the box reports closed
                 this.clearEventTimeout(DeviceEvent.LongTimeNotClose);
-                this.eventTimeouts.set(
-                  DeviceEvent.LongTimeNotClose,
-                  setTimeout(async () => {
-                    this.updateProperty(PropertyName.DeviceLongTimeNotCloseAlert, false);
-                    this.eventTimeouts.delete(DeviceEvent.LongTimeNotClose);
-                  }, eventDurationSeconds * 1000)
-                );
+                this.updateProperty(PropertyName.DeviceLongTimeNotCloseAlert, true);
                 break;
               case SmartDropOpen.LOW_TEMPERATURE_WARNING:
                 // Low temperature warning
@@ -6377,6 +6299,9 @@ export class SmartDrop extends Camera {
               // Both open and close pushes carry file_path, so the timer always resets to the latest
               // push, ensuring we wait for the recording to finish and its crop to be written.
               this.deliveryPictureFilePath = message.file_path;
+              if (message.open === SmartDropOpen.OPEN) {
+                this.probeDeliveryPicture(station, message.file_path!);
+              }
               if (existingTimeout !== undefined) {
                 clearTimeout(existingTimeout);
                 this.pictureEventTimeouts.delete(this.getSerial());
@@ -6509,40 +6434,183 @@ export class SmartDrop extends Camera {
 
   public p2pOpenEvent(evt: number, openType: number, userIndex: number | undefined): void {
     if (evt === 1) {
-      // Box opened — timesOpened is incremented by the push handler; don't also increment here (P2P and push both fire for every open)
-      this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "1", "p2p");
-      if (openType === 3) {
-        // Carrier delivery (openType:3)
-        this.updateProperty(PropertyName.DeviceOpenedByType, 4);
-        this.updateProperty(PropertyName.DeviceLastOpenedByType, 4);
-        this.updateProperty(PropertyName.DevicePackageDelivered, true);
-      } else if (openType === 2) {
-        if (userIndex === 0) {
-          // Master PIN — owner retrieving/checking, box now empty. Reset the delivery count
-          // (cascades to packageDelivered=false, timesOpened=0); see the push handler.
-          this.updateProperty(PropertyName.DeviceOpenedByType, 2);
-          this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
-          this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-          this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", "p2p");
-          this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
-        } else if (userIndex === undefined) {
-          // Press open (no PIN, no userIndex) — box assumed empty
-          this.updateProperty(PropertyName.DeviceOpenedByType, 2);
-          this.updateProperty(PropertyName.DeviceLastOpenedByType, 2);
-          this.updateProperty(PropertyName.DeviceLastOpenedByName, "");
-          this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", "p2p");
-          this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
-        } else {
-          // Delivery/access code (non-zero userIndex) — defer delivery state to cmd 6246
-          this.updateProperty(PropertyName.DeviceOpenedByType, 3);
-          this.updateProperty(PropertyName.DeviceLastOpenedByType, 3);
-          this.updateProperty(PropertyName.DeviceLastOpenedByName, String(userIndex));
-          this.updateProperty(PropertyName.DeviceOpenedByName, String(userIndex));
-        }
-      }
+      this.addOpenSignal({ p2p: { openType: openType, userIndex: userIndex } }, "p2p");
     } else if (evt === 2) {
-      // Box closed
-      this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "0", "p2p");
+      this.closeEvent("p2p");
+    }
+  }
+
+  private closeEvent(source: SourceType): void {
+    this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "0", source);
+    this.updateProperty(PropertyName.DeviceLidStuckAlert, false);
+    this.updateProperty(PropertyName.DeviceLongTimeNotCloseAlert, false);
+  }
+
+  /**
+   * Every open arrives twice: P2P cmd 2108 (first; carries userIndex, which tells master PIN apart)
+   * and a push ~0.5–1.5s later (carries person_name, the carrier name). Both halves are merged and
+   * the open is applied once — type, name, timesOpened and delivery state together, then a single
+   * "smartdrop opened" event — so consumers never see a raw PIN slot flash before the name, or a
+   * timesOpened bump that a master-PIN reset immediately undoes.
+   */
+  private addOpenSignal(signal: Pick<SmartDropPendingOpen, "p2p" | "push">, source: SourceType): void {
+    const now = Date.now();
+    const last = this.lastResolvedOpen;
+    if (
+      this.pendingOpen === undefined &&
+      last !== undefined &&
+      now - last.resolvedAt < SmartDrop.OPEN_LATE_SIGNAL_MS &&
+      ((signal.p2p !== undefined && last.p2p === undefined) || (signal.push !== undefined && last.push === undefined))
+    ) {
+      // Late half of an open that was already resolved on timeout — don't count it twice, but let a
+      // late push supply the carrier name.
+      if (signal.push !== undefined) {
+        last.push = signal.push;
+        const personName = signal.push.personName;
+        if (!isEmpty(personName) && (last.type === 3 || last.type === 4) && last.name !== personName) {
+          last.name = personName!;
+          this.updateProperty(PropertyName.DeviceOpenedByName, last.name);
+          this.updateProperty(PropertyName.DeviceLastOpenedByName, last.name);
+        }
+      } else {
+        last.p2p = signal.p2p;
+      }
+      rootHTTPLogger.debug("SmartDrop - late open signal merged into previous open", { deviceSN: this.getSerial(), signal });
+      return;
+    }
+
+    this.updateRawProperty(CommandType.CMD_SMART_DROP_OPEN, "1", source);
+    if (this.pendingOpen === undefined) {
+      this.pendingOpen = {
+        startedAt: now,
+        timeout: setTimeout(() => this.resolveOpen(), SmartDrop.OPEN_RESOLVE_TIMEOUT_MS),
+      };
+    }
+    if (signal.p2p !== undefined) this.pendingOpen.p2p = signal.p2p;
+    if (signal.push !== undefined) this.pendingOpen.push = signal.push;
+    if (this.pendingOpen.p2p !== undefined && this.pendingOpen.push !== undefined) {
+      this.resolveOpen();
+    }
+  }
+
+  /**
+   * Classify an open from its P2P and/or push halves. Returns the DeviceLastOpenedByType value.
+   *
+   * Observed (T8790 on HomeBase 2):
+   *   master PIN     P2P openType 2, userIndex 0        push openType 2, pin '0'
+   *   delivery PIN   P2P openType 2, userIndex <slot>   push openType 2, pin '<slot>', person_name
+   *   carrier        P2P openType 3 (no userIndex)      push openType 3, pin '0'
+   *   OPEN button    P2P openType 240, userIndex 0      push openType 240, pin '0'
+   * The OPEN button only works once after a master-PIN entry, to let a carrier drop into a known
+   * empty box — so it, and any other unrecognised openType, is reported as a carrier delivery.
+   */
+  static classifyOpen(
+    p2p?: SmartDropPendingOpen["p2p"],
+    push?: SmartDropPendingOpen["push"]
+  ): { type: number; name: string; userIndex?: number; rawOpenType?: number } {
+    const rawOpenType = p2p?.openType ?? push?.openType;
+    const personName = push?.personName ?? "";
+    switch (rawOpenType) {
+      case SmartDropOpenedBy.APP:
+        return { type: 1, name: "", rawOpenType };
+      case SmartDropOpenedBy.PIN: {
+        const pushSlot = push?.pin !== undefined && /^\d+$/.test(push.pin) ? Number.parseInt(push.pin) : undefined;
+        const userIndex = p2p !== undefined ? p2p.userIndex : pushSlot;
+        if (userIndex === 0) {
+          return { type: 2, name: "", userIndex, rawOpenType };
+        }
+        if (userIndex === undefined) {
+          // PIN-type open with no PIN slot — a press-open, i.e. a carrier drop
+          return { type: 4, name: !isEmpty(personName) ? personName : "Unknown", rawOpenType };
+        }
+        return { type: 3, name: !isEmpty(personName) ? personName : String(userIndex), userIndex, rawOpenType };
+      }
+      case SmartDropOpenedBy.EMERGENCY_RELEASE_BUTTON:
+        return { type: 5, name: "", rawOpenType };
+      case SmartDropOpenedBy.KEY:
+        return { type: 6, name: "", rawOpenType };
+      default:
+        // SmartDropOpenedBy.CARRIER, the OPEN button (240) and anything unrecognised
+        return { type: 4, name: !isEmpty(personName) ? personName : "Unknown", rawOpenType };
+    }
+  }
+
+  private resolveOpen(): void {
+    const open = this.pendingOpen;
+    if (open === undefined) return;
+    clearTimeout(open.timeout);
+    this.pendingOpen = undefined;
+
+    const { type, name, userIndex, rawOpenType } = SmartDrop.classifyOpen(open.p2p, open.push);
+    const source: SourceType = open.p2p !== undefined ? "p2p" : "push";
+    if (open.p2p === undefined || open.push === undefined) {
+      rootHTTPLogger.debug("SmartDrop - open resolved with only one signal", { deviceSN: this.getSerial(), open: { p2p: open.p2p, push: open.push } });
+    }
+    if (rawOpenType !== undefined && ![1, 2, 3, 4, 5].includes(rawOpenType)) {
+      rootHTTPLogger.info("SmartDrop - unrecognised openType, reporting as carrier", { deviceSN: this.getSerial(), p2p: open.p2p, push: open.push });
+    }
+
+    this.updateProperty(PropertyName.DeviceOpenedByType, type);
+    this.updateProperty(PropertyName.DeviceOpenedByName, name);
+    this.updateProperty(PropertyName.DeviceLastOpenedByType, type);
+    this.updateProperty(PropertyName.DeviceLastOpenedByName, name);
+
+    if (type === 2) {
+      // Master PIN — owner retrieving/checking, so the box is now empty. Reset the delivery count: the
+      // box only sends cmd 6246 when the count *changes*, so a retrieval that doesn't trigger one would
+      // otherwise leave DeviceDeliveries stuck. Cascades to packageDelivered=false and timesOpened=0
+      // (see handlePropertyChange) — timesOpened is never incremented for a master open.
+      this.updateRawProperty(CommandType.SUB1G_REP_SMARTDROP_DELIVERY_COUNT, "0", source);
+      this.updateProperty(PropertyName.DevicePackageDelivered, false, true);
+    } else {
+      this.updateProperty(PropertyName.DeviceTimesOpened, ((this.getPropertyValue(PropertyName.DeviceTimesOpened) as number) || 0) + 1);
+      const personName = open.push?.personName;
+      // Carrier opens are always deliveries; a PIN open only when the push names the carrier.
+      if (type === 4 || (type === 3 && !isEmpty(personName))) {
+        this.updateProperty(PropertyName.DevicePackageDelivered, true);
+      }
+      if ((type === 3 || type === 4) && !isEmpty(personName)) {
+        this.updateProperty(PropertyName.DevicePersonName, personName!);
+        this.updateProperty(PropertyName.DevicePersonDetected, true);
+        this.clearEventTimeout(DeviceEvent.PersonDetected);
+        this.eventTimeouts.set(
+          DeviceEvent.PersonDetected,
+          setTimeout(async () => {
+            this.updateProperty(PropertyName.DevicePersonName, "");
+            this.updateProperty(PropertyName.DevicePersonDetected, false);
+            this.eventTimeouts.delete(DeviceEvent.PersonDetected);
+          }, this.eventDurationSeconds * 1000)
+        );
+      }
+    }
+
+    this.lastResolvedOpen = { resolvedAt: Date.now(), p2p: open.p2p, push: open.push, type, name };
+    const details: SmartDropOpenedDetails = {
+      openedByType: type,
+      openedByName: name,
+      userIndex: userIndex,
+      rawOpenType: rawOpenType,
+      timesOpened: (this.getPropertyValue(PropertyName.DeviceTimesOpened) as number) || 0,
+      eventTime: open.startedAt,
+    };
+    this.emit("smartdrop opened", this, details);
+  }
+
+  /**
+   * Try the delivery crop early, while the recording is still running, so the picture lands within
+   * seconds of the open instead of after clipLength + 60s. A crop that isn't written yet just gets no
+   * reply; the regular post-recording download (processPushNotification) still runs regardless.
+   */
+  private probeDeliveryPicture(station: Station, filePath: string): void {
+    const cropPath = `/media/mmcblk0p1/video/${filePath.replace(/^h264_/, "")}_c00.jpg`;
+    for (const seconds of SmartDrop.DELIVERY_PICTURE_PROBE_SECONDS) {
+      setTimeout(() => {
+        rootHTTPLogger.debug("SmartDrop - probing early delivery picture", { deviceSN: this.getSerial(), cropPath, afterSeconds: seconds });
+        this.updateProperty(PropertyName.DevicePictureUrl, cropPath);
+        this.updateProperty(PropertyName.DeviceDeliveryThumbnailUrl, cropPath);
+        this.updateProperty(PropertyName.DeviceDeliveryCropUrl, cropPath);
+        station.downloadImage(cropPath);
+      }, seconds * 1000);
     }
   }
 

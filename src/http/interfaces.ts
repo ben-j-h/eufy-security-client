@@ -313,6 +313,23 @@ export interface DeviceEvents {
   "pin incorrect": (device: Device, state: boolean) => void;
   "lid stuck": (device: Device, state: boolean) => void;
   "battery fully charged": (device: Device, state: boolean) => void;
+  "smartdrop opened": (device: Device, details: SmartDropOpenedDetails) => void;
+}
+
+/** One physical SmartDrop open, resolved from its P2P (cmd 2108) and push halves. */
+export interface SmartDropOpenedDetails {
+  /** Same values as PropertyName.DeviceLastOpenedByType (2 = Master PIN, 3 = Delivery PIN, 4 = Carrier, …). */
+  openedByType: number;
+  /** Carrier / PIN name ("Amazon", "USPS", "Unknown", …); the raw PIN slot when no name was pushed; "" for owner opens. */
+  openedByName: string;
+  /** Box user slot from P2P (0 = master PIN); undefined for opens without a PIN. */
+  userIndex?: number;
+  /** Raw openType as reported by the box (P2P when available, else push). */
+  rawOpenType?: number;
+  /** DeviceTimesOpened after this open was applied (0 after a Master PIN reset). */
+  timesOpened: number;
+  /** Epoch ms of the first signal (P2P or push) for this open. */
+  eventTime: number;
 }
 
 export interface BrandData {
